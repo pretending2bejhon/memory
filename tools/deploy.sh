@@ -19,7 +19,10 @@ else
 fi
 trap 'git worktree remove "$WT" 2>/dev/null || true' EXIT
 # Only tracked contents inside this dedicated checkout are removed.
-git -C "$WT" rm -rq --ignore-unmatch -- .
+# --force is required on the first run: an orphan branch has no HEAD, so every
+# path is staged-only and git refuses to remove it without it. Scope is this
+# dedicated worktree, never the project tree.
+git -C "$WT" rm -rq --force --ignore-unmatch -- .
 cp dist/index.html dist/.nojekyll dist/og.jpg "$WT/"
 git -C "$WT" add -- index.html .nojekyll og.jpg
 if git -C "$WT" diff --cached --quiet; then
