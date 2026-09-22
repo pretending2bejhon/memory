@@ -1,0 +1,12 @@
+city.blend
+city.blend1
+*.mp4
+final.png
+contact.png
+renders/
+.tools/
+__pycache__/
+.gh-pages-wt/
+dist/
+HANDOFF.md
+docs/SPEC.md
