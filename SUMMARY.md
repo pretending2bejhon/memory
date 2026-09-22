@@ -24,4 +24,4 @@ The earlier visual-build QA sampled 8,746 positions across every route, includin
 
 The existing `timelapse.mp4`, `turntable.mp4` and `contact.png` belong to the original visual iteration and were not regenerated for this refresh. `LOG.md` retains that earlier design history.
 
-Fresh public-build, collision, browser and audio phase evidence belongs to [HANDOFF.md](HANDOFF.md), including each exact command, output and any remaining limitation. The final rulings in [docs/SPEC.md](docs/SPEC.md) require public source on `main`, English UI and procedural audio without audio files. The owner creates the repository, configures the remote, deploys and scores the listening sheet after the local handoff. This work does not publish anything or wait for listening scores.
+Public-build, collision, browser and audio evidence is reproducible with `qa_public.py`, `qa_city.py` and `qa_audio.py`. The rulings behind the build: public source on `main`, an English interface, and procedural audio with no audio files. The listening sheet at the end of this log is scored after deployment.

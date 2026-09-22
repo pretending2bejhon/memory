@@ -65,15 +65,15 @@ Run `python viewer/build.py` after editing for private local inspection, or `pyt
 
 The builder replaces `__CITY_AUDIO__` in the template with `city-audio.js`, just as it inlines street life and the ride camera. All procedural audio code remains inside the generated page.
 
-The viewer uses three.js 0.170 from jsDelivr and fonts from Google Fonts; it needs network access to those resources. These are the only external runtime loads. See [SPEC.md](SPEC.md) for the binding public-page and audio requirements.
+The viewer uses three.js 0.170 from jsDelivr and fonts from Google Fonts; it needs network access to those resources. These are the only external runtime loads.
 
 ## Verification
 
-`qa_city.py` uses a project-local browser harness directly, without reading the vault or relying on a vault-owned browser wrapper. Start `python -m http.server 8765 --bind 127.0.0.1`, then run `python qa_city.py`. Screenshots and machine-readable results go to `renders/qa/`. Run the public-page harness against `/dist/` as recorded in [HANDOFF.md](../HANDOFF.md); it must report 1,246 nodes and zero page errors, with desktop and 375 px screenshots.
+`qa_city.py` uses a project-local browser harness directly, without reading the vault or relying on a vault-owned browser wrapper. Start `python -m http.server 8765 --bind 127.0.0.1`, then run `python qa_city.py`. Screenshots and machine-readable results go to `renders/qa/`. Run the same harness against `/dist/` with `--url`; it must report 1,246 nodes and zero page errors, with desktop and 375 px screenshots.
 
 The checks sample every route at 0.1-unit intervals for raw camera clearance, final camera clearance, look-ahead occlusion, and both walking lanes. They also exercise entering/exiting rides, district focus, timeline changes, and a fresh mobile page. `window.__vc` exposes the scene state and route helpers for inspection.
 
-`python qa_audio.py` reuses the city QA browser harness. Its gates verify no running audio context after five seconds without a click, a running context after Sound is clicked, analyser RMS above -40 dBFS, no crossfade discontinuity above 6 dB in a 20 ms window, frame rate above 55 fps with sound on, and zero console errors. Run `python qa_city.py` alongside it to retain the collision and page-error gates. The exact commands, measured output and any limits of the measurements belong in [HANDOFF.md](../HANDOFF.md).
+`python qa_audio.py` reuses the city QA browser harness. Its gates verify no running audio context after five seconds without a click, a running context after Sound is clicked, analyser RMS above -40 dBFS, no crossfade discontinuity above 6 dB in a 20 ms window, frame rate above 55 fps with sound on, and zero console errors. Run `python qa_city.py` alongside it to retain the collision and page-error gates. Each run writes its measured output to `renders/qa/<prefix>-audio-report.json`.
 
 The twelve-room gate selects each room, waits for the scheduled bar boundary and two-bar crossfade to settle, then samples its analyser for four seconds. Every room must be non-silent, and every pair must differ by at least 8 percent in spectral centroid or 2 dB in RMS. The Archive timeline check scrubs weeks 0 through 12 and verifies that cutoff follows measured brightness monotonically. This compares cutoff with brightness, rather than requiring chronological weeks to get steadily brighter: dates, status and decay can lower brightness as time advances.
 

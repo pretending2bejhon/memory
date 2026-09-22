@@ -184,7 +184,7 @@ and window-band geometry tweaks at this scale.
 
 ## Listening sheet
 
-Twelve procedural rooms share one 140 BPM clock. Listen after each switch has crossed the bar boundary and completed its two-bar fade. Score each room from 1 to 10 after the owner deploys; the empty cells are intentional. Automated measurements and implementation choices are recorded in [HANDOFF.md](HANDOFF.md).
+Twelve procedural rooms share one 140 BPM clock. Listen after each switch has crossed the bar boundary and completed its two-bar fade. Score each room from 1 to 10 after the owner deploys; the empty cells are intentional. The measured room fingerprints come from `qa_audio.py`; every chosen value is declared in the room objects in `viewer/city-audio.js`.
 
 | Room | What to listen for | Score |
 |---|---|---|
