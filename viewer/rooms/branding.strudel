@@ -1,0 +1,9 @@
+// Signal Row · branding · playful electro signal in C
+setcpm(140/4)
+
+kick: s("bd*4").bank("RolandTR808").lpf(1400).shape(.25).gain(.95)
+hatC: s("[~ hh]*8").bank("RolandTR808").gain("[.5 .7]*4")
+blip: note("c4 ~ ~ g4 ~ ~ bb4 ~ ~ ~ c5 ~ ~ g4 ~ ~").s("square").lpf(3200).decay(.12).sustain(0).gain(.2).delay(.3).delaytime(.2143).delayfeedback(.35)
+perc: s("[~ cb]*4").bank("RolandTR808").gain(.3).late(.0625)
+clap: s("[~ cp]*2").bank("RolandTR808").gain(.6).room(.3)
+riser: s("<~!7 white>").attack(1.6).sustain(1).release(.05).hpf(600).hpenv(4).hpattack(1.6).gain(.1)

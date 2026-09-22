@@ -184,19 +184,19 @@ and window-band geometry tweaks at this scale.
 
 ## Listening sheet
 
-Twelve procedural rooms share one 140 BPM clock. Listen after each switch has crossed the bar boundary and completed its two-bar fade. Score each room from 1 to 10 after the owner deploys; the empty cells are intentional. The measured room fingerprints come from `qa_audio.py`; every chosen value is declared in the room objects in `viewer/city-audio.js`.
+Twelve Strudel rooms share one 140 BPM clock (rewritten 2026-09-22 from hand-built oscillators to Strudel samples and synths). Listen after each switch has reached its drop (the new kick after the one-beat cut). Score each room from 1 to 10; the empty cells are intentional. The measured room fingerprints come from `qa_audio.py`; the music is in `viewer/rooms/<room>.strudel`.
 
 | Room | What to listen for | Score |
 |---|---|---|
-| The Compass | A firm kick, one offbeat hat, sparse percussion and a low ceremonial drone. | |
-| The Archive | A shuffled two-pitch roll and a warm delayed stab that dull as the district fades. | |
-| The Library | Round kick, offbeat sub, spacious minor-ninth stabs and distant ride accents. | |
-| The Works | Dry metallic rim repetition, hard kick transients and a ratcheting fourth-bar fill. | |
-| The Yards | A stab just before the downbeat, rising filter tension and a compact 16-bar return. | |
-| Downtown | Dense accented hats, a three-pitch tom roll and claps sitting slightly behind the beat. | |
-| The Hills | The widest swing, a warm four-pitch roll, woodblock and a soft major-seventh pad. | |
-| Prasma Campus | Precise hat accents, short pitched percussion and a bright, quickly gated stab. | |
-| Signal Row | A playful three-note blip phrase repeating every four bars above the clap. | |
-| The Dome | A rising four-note arpeggio, grainy percussion and a long dotted-eighth echo. | |
-| The Reef | Soft underwater hats, high bubbles and a slowly moving, spacious pad filter. | |
-| The Gate | A stripped kick and low drone with room to hear the reverb tail. | |
+| The Compass | Saturated 909 kick, a rolling sub, one offbeat hat, a tabla hit echoing every two bars, a D drone. | |
+| The Archive | Dub techno: shuffled 808 hats, hand percussion, an F minor stab thrown into a long dotted-eighth echo, a pink noise bed. | |
+| The Library | Detroit: 909 ride on the offbeat, offbeat saw bass, an A minor-ninth supersaw chord every two bars. | |
+| The Works | Industrial: distorted kick, 909 rim on every offbeat sixteenth, a ratcheted tom fill in bar four, an industrial clank. | |
+| The Yards | A rave stab on the last sixteenth, conga groove, an eight-bar filter sweep and a two-bar white-noise riser. | |
+| Downtown | Peak-time hardgroove: shuffled 909 hats, conga loop, rolling F bass, late clap, supersaw stabs, a "yeah" every four bars. | |
+| The Hills | Baile funk: tamborzão on 808 toms, heavy swing, 808 shaker and cowbell, mouth chops, a C major-seventh pad. | |
+| Prasma Campus | Tight and bright: accented 909 hats, 707 rim pairs, a short square stab with gated reverb. | |
+| Signal Row | Electro: 808 kit, a square-wave C-G-Bb phrase with echo, offbeat cowbell, a riser every eight bars. | |
+| The Dome | Bit-crushed D minor arpeggio panning left and right, Speak & Spell voice chops, a sus2 supersaw pad. | |
+| The Reef | Deep low-passed kick, random bubbles at random pitch, a G minor supersaw pad, a brown-noise tide. | |
+| The Gate | A soft kick, an F sub drone and wind. | |

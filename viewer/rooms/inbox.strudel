@@ -1,0 +1,6 @@
+// The Gate · inbox · wind at the gate, a pulse and a low drone in F
+setcpm(140/4)
+
+kick: s("bd*4").bank("RolandTR909").lpf(1800).gain(.85)
+pad: note("f1").s("sine").slow(4).attack(1).sustain(1).release(1).gain(.45)
+noise: s("wind:3").slow(4).gain(.25).lpf(2500)

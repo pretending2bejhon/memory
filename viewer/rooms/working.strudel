@@ -1,0 +1,13 @@
+// Downtown · working · peak-time hardgroove in F minor
+// Paste into strudel.cc to play it; paste it back here to change the room.
+setcpm(140/4)
+
+kick: s("bd*4").bank("RolandTR909").shape(.35).gain(.95)
+bass: note("[~ f1 f2 f1]*4").s("sawtooth").lpf(260).lpq(8).decay(.11).sustain(0).gain(.5)
+hatC: s("hh*16").bank("RolandTR909").gain("[.3 .5 .38 .62]*4").swingBy(.2, 8).hpf(6500)
+hatO: s("[~ oh]*4").bank("RolandTR909").gain(.42).cut(1)
+perc: s("[hand:3 ~ ~ hand:7] [~ hand:3 ~ hand:12] [~ ~ hand:3 ~] [hand:7 ~ hand:12 ~]").swingBy(.2, 8).gain(.75).pan(sine.range(.3, .7).slow(4))
+clap: s("[~ cp]*2").bank("RolandTR909").gain(.6).room(.2).late(.007)
+stab: note("<[~@10 [f3,ab3,c4,eb4] ~@5] [~@10 [f3,ab3,c4,eb4] ~@2 [eb3,g3,bb3] ~@2]>").s("supersaw").lpf(2400).decay(.16).sustain(0).gain(.32)
+vox: s("<~ ~ ~ [~@13 yeah:12 ~@2]>").gain(.55).delay(.35).delaytime(.3214).delayfeedback(.4)
+pad: note("<[f2,ab2,c3] [f2,ab2,c3] [eb2,g2,bb2] [db2,f2,ab2]>").s("triangle").attack(.4).release(1.2).lpf(1400).gain(.22)

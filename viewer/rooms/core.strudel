@@ -1,0 +1,9 @@
+// The Compass · core · hypnotic minimal in D, one hit at a time
+setcpm(140/4)
+
+kick: s("bd*4").bank("RolandTR909").shape(.2).lpf(5000).gain(1)
+bass: note("[~ d1 ~ d1]*4").s("sine").decay(.18).sustain(0).gain(.55)
+hatO: s("[~ oh]*4").bank("RolandTR808").gain(.34).cut(1)
+perc: s("<[~@10 tabla:3 ~@5] ~>").gain(.6).room(.35).delay(.4).delaytime(.3214).delayfeedback(.45)
+pad: note("d1").s("sine").slow(16).attack(3).sustain(1).release(3).gain(.4)
+riser: s("<~!15 white>").attack(1.6).sustain(1).release(.05).hpf(500).hpenv(4).hpattack(1.6).gain(.1)

@@ -1,0 +1,10 @@
+// The Archive · episodic · dub memory in F, echoes of old days
+setcpm(140/4)
+
+kick: s("bd*4").bank("RolandTR909").lpf(3200).gain(.9)
+hatC: s("hh*16").bank("RolandTR808").gain("[.25 .4 .3 .55]*4").swingBy(.16, 8)
+hatO: s("[~ oh]*4").bank("RolandTR808").gain(.32).cut(1)
+perc: s("hand:4 ~ hand:9 ~ hand:4 ~ ~ hand:9 ~ hand:4 ~ hand:9 ~ ~ hand:4 ~").swingBy(.16, 8).gain(.62).room(.2)
+stab: note("[~@10 [f3,ab3,c4] ~@5]").s("sawtooth").lpf(1600).lpenv(2).decay(.22).sustain(0).gain(.34).delay(.6).delaytime(.3214).delayfeedback(.6)
+bass: note("[~ f1]*4").s("sine").decay(.26).sustain(0).gain(.6)
+noise: s("pink").slow(4).attack(.4).sustain(1).release(.4).lpf(1800).gain(.05)

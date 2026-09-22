@@ -1,0 +1,9 @@
+// The Yards · prospective · rave stabs in G that point at what is coming
+setcpm(140/4)
+
+kick: s("bd*4").bank("RolandTR909").shape(.3).gain(.95)
+hatC: s("hh*16").bank("RolandTR909").gain("[.35 .2 .45 .25]*4").swingBy(.14, 8)
+hatO: s("[~ oh]*4").bank("RolandTR909").gain(.4).cut(1)
+perc: s("[hand:0 ~ ~ hand:5] [~ hand:11 ~ hand:5] [hand:0 ~ hand:11 ~] [hand:5 ~ hand:11 ~]").gain(.62).swingBy(.14, 8)
+stab: s("[~@15 rave:2]").gain(.5).speed("<1 1 .944 1.122>").room(.3)
+riser: s("<~!8 white@2 ~!6>").attack(3.2).sustain(1).release(.05).hpf(400).hpenv(4.5).hpattack(3.2).gain(.12)

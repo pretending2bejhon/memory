@@ -43,6 +43,9 @@ def main():
     page = (HERE / 'template.html').read_text(encoding='utf-8').replace('__DATA__', blob)
     for token, name in [('__CITY_LIFE__', 'city-life.js'), ('__RIDE_CAMERA__', 'ride.js'), ('__CITY_AUDIO__', 'city-audio.js')]:
         page = page.replace(token, (HERE / name).read_text(encoding='utf-8'))
+    # Each room is a plain Strudel file, pasteable into strudel.cc and back.
+    rooms = {path.stem: path.read_text(encoding='utf-8') for path in sorted((HERE / 'rooms').glob('*.strudel'))}
+    page = page.replace('__CITY_ROOMS__', json.dumps(rooms, ensure_ascii=False).replace('</', '<\\/'))
     head, body = page.split('<style>', 1)
     doc = ('<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n'
            '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">\n'

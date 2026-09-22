@@ -1,0 +1,8 @@
+// The Reef · reef · deep water in G, bubbles over a slow tide
+setcpm(140/4)
+
+kick: s("bd*4").bank("RolandTR909").lpf(700).gain(1)
+hatC: s("[~ hh]*8").bank("RolandTR808").gain(.22).lpf(4200)
+bubble: s("bubble*16").n(irand(8)).degradeBy(.82).gain(.5).speed(rand.range(.8, 1.4)).room(.5)
+pad: note("<[g2,bb2,d3] [eb2,g2,bb2]>").slow(2).s("supersaw").lpf(1500).attack(1).release(2).gain(.18)
+noise: s("brown").slow(4).attack(1.5).sustain(1).release(1.5).lpf(600).gain(.06)

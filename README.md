@@ -11,7 +11,7 @@ Every note in an Obsidian vault becomes a building. Every `[[wikilink]]` becomes
 The project has two halves that share the same data and the same rules:
 
 - **An offline render pipeline** in Blender (`export.py`, `layout.py`, `city.py`): a still, a time-lapse, a turntable, a contact sheet of the design iterations and a compressed GLB of the city.
-- **An interactive viewer** in the browser (`viewer/`): the same city in three.js, with a timeline scrubber, district focus, street traffic, walking citizens, rain, a collision-checked street-level ride, and procedural sound.
+- **An interactive viewer** in the browser (`viewer/`): the same city in three.js, with a timeline scrubber, district focus, street traffic, walking citizens, rain, a collision-checked street-level ride, and room music written in Strudel.
 
 The export stores numbers and folder metadata, with no note titles, filenames, paths or note text. The public build masks subdistrict names with per-district `block 1`, `block 2`, and later labels, and uses the city's display names in its interface. The source is intended for a public repository on `main`; the published page is generated separately in `dist/`. See [docs/DATA.md](docs/DATA.md).
 
@@ -51,7 +51,7 @@ This writes `dist/index.html`, `dist/.nojekyll`, and `dist/og.jpg`. Run the priv
 bash tools/deploy.sh "message"
 ```
 
-Only the owner creates the public repository, configures `origin`, and deploys. The local handoff does none of those actions. The rulings behind this build: public source on `main`, an English interface, and procedural sound with no audio files.
+Only the owner creates the public repository, configures `origin`, and deploys. The local handoff does none of those actions. The rulings behind this build: public source on `main`, an English interface, and room music written in Strudel.
 
 To render with Blender (headless, never opens the GUI):
 
@@ -61,7 +61,9 @@ To render with Blender (headless, never opens the GUI):
 
 Modes: `iter` (quick Workbench still), `final` (EEVEE still with bloom), `timelapse`, `turntable`, `glb`. See [docs/PIPELINE.md](docs/PIPELINE.md).
 
-Click Sound beside View, or press `M`, to turn sound on. It starts off and requires a deliberate gesture even when the browser remembers an on preference. Each of the twelve districts has its own room, and overview plays Downtown's distant Skyline mix. Room changes crossfade on the shared 140 BPM clock. Scrubbing time adds voices as buildings appear and changes the filter and reverb as their lights fade. Every sound is synthesized in the browser, with no audio files. See [docs/VIEWER.md](docs/VIEWER.md) for controls and audio verification, and [LOG.md](LOG.md) for the owner's listening sheet.
+Click Sound beside View, or press `M`, to turn sound on. It starts off and requires a deliberate gesture even when the browser remembers an on preference. Each of the twelve districts has its own room, and overview plays Downtown's distant Skyline mix. Room changes ride the shared 140 BPM clock the way a DJ mixes: a bass-free bridge, a riser, a one-beat cut and the new room's kick and bass slamming in on an eight-bar phrase. Scrubbing time adds voices as buildings appear and changes the filter and reverb as their lights fade.
+
+The music is written in [Strudel](https://strudel.cc/), the browser port of TidalCycles. Each room is one plain file in `viewer/rooms/<room>.strudel`: paste it into strudel.cc to hear and change it, paste it back and rebuild. Each labelled line (`kick:`, `hatC:`, `pad:`) is one layer; the labels drive the timeline mix, so keep the names. Strudel and its samples load from public CDNs on the first Sound gesture (jsdelivr, strudel.b-cdn.net, the TidalCycles Dirt-Samples on GitHub), so sound needs a network connection. With sound on, `cityAudio.code('working')` in the browser console prints a room, and `cityAudio.setCode('working', code)` swaps it live without a rebuild. See [docs/VIEWER.md](docs/VIEWER.md) for controls and audio verification, and [LOG.md](LOG.md) for the owner's listening sheet.
 
 ## What is in the repository
 
@@ -73,7 +75,8 @@ Click Sound beside View, or press `M`, to turn sound on. It starts off and requi
 | `design.py` | Shared building dimensions and clear boulevard routes |
 | `contact.py` | Contact sheet of the design iterations with their scores (Pillow) |
 | `viewer/template.html`, `viewer/city-life.js`, `viewer/ride.js` | Interactive city, street life and ride camera |
-| `viewer/city-audio.js` | Procedural sound engine, room definitions and Sound control |
+| `viewer/city-audio.js` | Sound engine: 140 BPM transport, room buses, phrase-locked DJ transitions and timeline mix around Strudel |
+| `viewer/rooms/*.strudel` | The twelve rooms as Strudel code, one file per district |
 | `qa_city.py`, `qa_audio.py` | Shared browser harness for city geometry, interaction, sound and performance gates |
 | `viewer/build.py` | Compacts data into private local pages by default; `--public` creates the masked publication in `dist/` |
 | `data/vault-city.json` | Anonymous nodes and edges, numeric state and folder metadata |
@@ -94,3 +97,7 @@ Click Sound beside View, or press `M`, to turn sound on. It starts off and requi
 ## Numbers from the current vault
 
 1,246 notes, 2,304 unique links between them, 13 weekly frames from 2026-06-29 to 2026-09-21, 12 districts. The current visual build includes 15 street loops and up to 260 animated pedestrians. See [docs/VIEWER.md](docs/VIEWER.md) for controls and verification.
+
+## License
+
+GNU Affero General Public License v3.0 or later, see [LICENSE](LICENSE). The viewer plays its music with [Strudel](https://codeberg.org/uzu/strudel), which is AGPL-3.0-or-later, and the published page links back to this source.

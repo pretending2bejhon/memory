@@ -1,0 +1,8 @@
+// The Library · semantic · Detroit ride and minor-ninth chords in A
+setcpm(140/4)
+
+kick: s("bd*4").bank("RolandTR909").lpf(2600).gain(.95)
+bass: note("[~ a1]*4").s("sawtooth").lpf(420).lpq(4).decay(.2).sustain(0).gain(.48)
+stab: note("<[~@10 [a2,c3,e3,g3,b3] ~@5] ~>").s("supersaw").lpf(2700).lpenv(1.5).decay(.7).sustain(0).gain(.28).room(.5)
+ride: s("[~ rd]*4").bank("RolandTR909").gain(.5)
+hatC: s("hh*16").bank("RolandTR707").gain(.26).hpf(9000)

@@ -1,0 +1,9 @@
+// The Works · procedural · industrial hardgroove in E, metal and machines
+setcpm(140/4)
+
+kick: s("bd*4").bank("RolandTR909").distort(1.4).lpf(3500).gain(.85)
+hatC: s("[hh ~ hh:1 hh]*4").bank("RolandTR909").gain("[.7 .35 .45]*4").hpf(7000)
+rim: s("[~ rim]*8").bank("RolandTR909").gain("[.7 .9]*4").hpf(1500)
+perc: s("<~ ~ ~ [~@12 [mt mt] [mt lt] [lt lt] lt]>").bank("RolandTR909").gain(.7).ply(2)
+clank: s("<industrial:12 ~ ~ ~>").gain(.55).room(.3).speed(.9)
+bass: note("[~ e1 ~ e1] [~ e1 e2 e1]").fast(2).s("square").lpf(220).decay(.1).sustain(0).gain(.26)

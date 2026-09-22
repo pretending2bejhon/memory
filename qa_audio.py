@@ -137,7 +137,7 @@ def wait_room(engine, room):
     return wait_until(engine, """() => {
       const a = window.__vc.audio;
       return a.room === %s && (!a.transition || a.ctx.currentTime >= a.transition.end);
-    }""" % json.dumps(room), 8)
+    }""" % json.dumps(room), 25)
 
 
 def dbfs(rms):
@@ -171,7 +171,9 @@ def measure_audio(engine, seconds=4, include_bins=False):
     return result
 
 
-def measure_crossfade(engine, target="working"):
+def measure_transition(engine, target="working"):
+    """Jhon's transition, measured from his REEF SESSIONS 002 set: next-bar start, a bass-free bridge,
+    a riser, a one-beat cut, and the new kick and bass slamming in on an eight-bar phrase line."""
     engine.evaluate(INSTALL_PROBE)
     requested = engine.evaluate("""target => {
       const a = window.__vc.audio;
@@ -182,86 +184,114 @@ def measure_crossfade(engine, target="working"):
       const a = window.__vc.audio, t = a.transition;
       if (!t || t.to !== %s) return false;
       const buses = Array.from(a.buses);
-      const outgoing = buses.find(b => b.id === t.from);
-      const incoming = buses.find(b => b.id === t.to);
+      const outgoing = buses.find(b => b.id === t.from), incoming = buses.find(b => b.id === t.to);
       if (!outgoing || !incoming) return false;
       const p = window.__qaProbe;
       p.connect(outgoing.preFade, 1); p.connect(outgoing.postFade, 2);
       p.connect(incoming.preFade, 3); p.connect(incoming.postFade, 4);
-      return {...t, attachedAt: a.ctx.currentTime,
-        epoch: a.diagnostics?.epoch ?? a.diagnostics?.origin ?? null};
+      // Keep every mute branch awake so Chromium reports live AudioParam values.
+      const keep = a.ctx.createConstantSource(); keep.offset.value = 1e-12;
+      for (const bus of [outgoing, incoming]) for (const node of Object.values(bus.mutes)) keep.connect(node);
+      keep.start(); window.__qaKeep = keep;
+      return {...t, attachedAt: a.ctx.currentTime, low: {outgoing: [...outgoing.low], incoming: [...incoming.low]},
+        epoch: a.diagnostics?.epoch ?? a.diagnostics?.origin ?? null, phrase: a.phrase, minBridge: a.minBridge};
     }""" % json.dumps(target), 3)
-    current = engine.evaluate("window.__vc.audio.ctx.currentTime")
-    engine.wait(max(0, transition["end"] - current) + .04)
+    samples = []
+    while True:
+        row = engine.evaluate("""() => {
+          const a = window.__vc.audio, t = a.transition, buses = Array.from(a.buses);
+          const o = buses.find(b => b.id === %s), i = buses.find(b => b.id === %s);
+          const low = bus => bus ? Math.max(...[...bus.low].map(n => bus.mutes[n] ? bus.mutes[n].gain.value : 0)) : null;
+          return {time: a.ctx.currentTime, outLow: low(o), inLow: low(i),
+            outFader: o ? o.fader.gain.value : null, inFader: i ? i.fader.gain.value : null, cut: a.cut.gain.value};
+        }""" % (json.dumps(transition["from"]), json.dumps(target)))
+        samples.append(row)
+        if row["time"] > transition["drop"] + .6:
+            break
+        engine.wait(.05)
     snapshot = engine.evaluate(SNAPSHOT_PROBE)
-    cleanup = engine.evaluate("() => window.__qaProbe.destroy()")
-    bins = [item for item in snapshot["bins"]
-            if item["start"] >= transition["start"] and item["end"] <= transition["end"]]
-    snapshot["bins"] = bins
-    summary = summarize_pcm(snapshot)
-    summary["probeCleanup"] = cleanup
-    levels = []
-    missing = []
+    cleanup = engine.evaluate("() => { window.__qaKeep.stop(); window.__qaKeep.disconnect(); return window.__qaProbe.destroy(); }")
+    bins = snapshot["bins"]
+    beat = BAR_SECONDS / 4
+    start, drop = transition["start"], transition["drop"]
+    fade = []
     for item in bins:
-        master, before_out, after_out, before_in, after_in = item["rms"]
-        if before_out < 1e-9 or before_in < 1e-9:
-            missing.append({"start": item["start"], "beforeOut": before_out, "beforeIn": before_in})
+        if not (start <= item["start"] and item["end"] <= start + BAR_SECONDS):
             continue
-        outgoing = after_out / before_out
-        incoming = after_in / before_in
-        combined = math.sqrt(outgoing * outgoing + incoming * incoming)
-        progress = ((item["start"] + item["end"]) / 2 - transition["start"]) / (transition["end"] - transition["start"])
-        levels.append({"start": item["start"], "outgoingGain": outgoing,
-                       "incomingGain": incoming, "combinedPowerDb": dbfs(combined),
-                       "outgoingCurveError": abs(outgoing - math.cos(progress * math.pi / 2)),
-                       "incomingCurveError": abs(incoming - math.sin(progress * math.pi / 2))})
-    deltas = [abs(right["combinedPowerDb"] - left["combinedPowerDb"])
-              for left, right in zip(levels, levels[1:])]
+        before_in, after_in = item["rms"][3], item["rms"][4]
+        if before_in < 1e-9:
+            continue
+        progress = ((item["start"] + item["end"]) / 2 - start) / BAR_SECONDS
+        fade.append(abs(after_in / before_in - math.sin(progress * math.pi / 2)))
+    def level(lo, hi):
+        rows = [item["rms"][0] for item in bins if lo <= item["start"] and item["end"] <= hi]
+        return dbfs(math.sqrt(sum(value * value for value in rows) / len(rows))) if rows else None
+    groove = level(drop - 3 * BAR_SECONDS, drop - BAR_SECONDS)
+    cut_level = level(drop - beat + .03, drop - .03)
+    after_drop = level(drop + .03, drop + beat)
+    outgoing_after = max((item["rms"][2] for item in bins if drop + .05 <= item["start"] and item["end"] <= drop + BAR_SECONDS), default=None)
     epoch = transition.get("epoch")
-    phase_error = None if epoch is None else abs((transition["start"] - epoch) / BAR_SECONDS - round((transition["start"] - epoch) / BAR_SECONDS))
-    summary.update({"request": requested, "transition": transition,
-        "transitionDurationSeconds": transition["end"] - transition["start"],
-        "barPhaseError": phase_error,
-        "measuredGainWindows": levels, "missingInputWindows": missing,
-        "maxSwitchEnvelopeDeltaDb": max(deltas, default=9999),
-        "maxEqualPowerCurveError": max((max(row["outgoingCurveError"], row["incomingCurveError"]) for row in levels), default=9999),
-        "measurement": "Paired pre/post PCM energy measures the applied room gains. The 6 dB switch gate uses their combined equal-power envelope. Raw master RMS jumps from percussive attacks remain recorded separately."})
+    bars = lambda t: (t - epoch) / BAR_SECONDS
+    start_error = abs(bars(start) - round(bars(start)))
+    drop_error = abs(bars(drop) / transition["phrase"] - round(bars(drop) / transition["phrase"]))
+    summary = summarize_pcm({**snapshot, "bins": [item for item in bins if start <= item["start"] and item["end"] <= drop + .5]})
+    summary.update({"request": requested, "transition": transition, "probeCleanup": cleanup,
+        "bridgeBars": (drop - start) / BAR_SECONDS, "startBarPhaseError": start_error, "dropPhrasePhaseError": drop_error,
+        "maxIncomingFadeCurveError": max(fade, default=9999), "fadeWindows": len(fade),
+        "grooveDbfs": groove, "cutDbfs": cut_level, "afterDropDbfs": after_drop,
+        "outgoingPostFadeRmsAfterDrop": outgoing_after, "paramSamples": samples,
+        "measurement": "Paired pre/post PCM energy measures the incoming fade-in over its first bar. AudioParam samples every 50 ms follow the kick and bass mutes of both rooms and the master cut. Master PCM compares the groove two bars before the drop with the cut beat and the first beat after it."})
     return summary
 
 
 def measure_rooms(engine, report):
     """Capture room identities after the transition and shared effect tails."""
     engine.evaluate("() => window.__vc.updateWeek(12)")
+    # The music lives in viewer/rooms/<id>.strudel and is expected to change by ear, so the
+    # contract pins structure and the engine-side mix, never the patterns themselves.
     definitions = engine.evaluate("""() => Object.fromEntries(Object.entries(window.__vc.audio.rooms)
       .filter(([id]) => id !== 'skyline').map(([id, room]) => [id, {
-        root: room.root, swing: room.swing, loopBars: room.loopBars,
-        cycleBars: room.cycleBars, withhold: room.withhold, densityCap: room.densityCap,
-        voices: room.voices, fx: room.fx
+        title: room.title, root: room.root, cycleBars: room.cycleBars, withhold: room.withhold,
+        layers: room.layers, fx: room.fx, code: room.code
       }]))""")
     report["roomDefinitions"] = definitions
     report["checks"]["all twelve room definitions"] = set(definitions) == set(ROOM_IDS)
     expected_roots = dict(zip(ROOM_IDS, (38, 41, 33, 40, 43, 41, 36, 45, 48, 38, 31, 41)))
-    expected_swings = dict(zip(ROOM_IDS, (.50, .58, .52, .50, .54, .56, .60, .53, .55, .51, .55, .50)))
-    report["checks"]["specified room roots and swing"] = all(
-        definitions.get(room, {}).get("root") == expected_roots[room]
-        and definitions.get(room, {}).get("swing") == expected_swings[room]
-        for room in ROOM_IDS)
-    report["checks"]["specified room cycles and Signal Row loop"] = all(
+    report["checks"]["specified room roots"] = all(
+        definitions.get(room, {}).get("root") == expected_roots[room] for room in ROOM_IDS)
+    report["checks"]["specified room cycles"] = all(
         definitions.get(room, {}).get("cycleBars") == (16 if room == "prospective" else 32)
-        for room in ROOM_IDS) and definitions.get("branding", {}).get("loopBars") == 4
+        for room in ROOM_IDS)
+    engine_state = engine.evaluate("""() => {
+      const a = window.__vc.audio;
+      return {engine: a.diagnostics.engine, ready: a.ready, compileErrors: a.diagnostics.compileErrors,
+        loadMs: a.diagnostics.loadMs ?? null, readyMs: a.diagnostics.readyMs ?? null};
+    }""")
+    report["engine"] = engine_state
+    report["checks"]["every room is Strudel code that compiles"] = (
+        engine_state["engine"] == "strudel" and engine_state["ready"] and not engine_state["compileErrors"]
+        and all("setcpm(140/4)" in definitions.get(room, {}).get("code", "") for room in ROOM_IDS))
+    report["checks"]["every room has a kick and at least three layers"] = all(
+        "kick" in definitions.get(room, {}).get("layers", []) and len(definitions.get(room, {}).get("layers", [])) >= 3
+        for room in ROOM_IDS)
+    report["checks"]["every withheld layer exists in its room"] = all(
+        all(name in definitions[room]["layers"] for name in
+            ([] if definitions[room]["withhold"] is None else
+             definitions[room]["withhold"] if isinstance(definitions[room]["withhold"], list) else [definitions[room]["withhold"]]))
+        for room in ROOM_IDS if room in definitions)
     contracts = {
-        "core": {"withhold": "hatO", "densityCap": .4, "voices.kick.pattern": "9...9...9...9...", "voices.perc.pitches": [7], "voices.pad.sub": True, "fx.lpf": 9000, "fx.reverb": .30},
-        "episodic": {"withhold": "perc", "voices.perc.pattern": "9.5.9..5.9.5..9.", "voices.perc.pitches": [0, 5], "voices.stab.pitches": [0, 3, 7], "voices.stab.lpf": 2400, "voices.noise.levelDb": -30, "fx.delay": .5, "fx.reverb": .35},
-        "semantic": {"withhold": "bass", "voices.bass.pattern": "..9...9...9...9.", "voices.stab.pitches": [0, 3, 7, 10, 14], "voices.ride.pattern": "..7...7...7...7..", "voices.hatC.pattern": "4444444444444444", "fx.lpf": 7000, "fx.reverb": .6},
-        "procedural": {"withhold": "rim", "voices.rim.pattern": ".7.9.7.9.7.9.7.9", "voices.perc.pitches": [0, 3], "voices.clank.pitches": [12], "fx.drive": .35, "fx.reverb": .08},
-        "prospective": {"withhold": ["hatO", "perc"], "voices.stab.pattern": "...............9", "fx.sweep": [1000, 8000], "fx.sweepBars": 8, "fx.reverb": .25},
-        "working": {"withhold": "hatO", "voices.hatC.pattern": "7595759575957595", "voices.perc.pattern": "9..5.9.5..9.5.9.", "voices.perc.pitches": [0, 5, 7], "voices.clap.pattern": "....9.......9...", "voices.clap.nudgeMs": 12, "voices.stab.pattern": "..........9.....", "fx.lpf": 12000, "fx.reverb": .2},
-        "jhon": {"withhold": "shaker", "voices.perc.pattern": "9.5.9.5..9.5.9.5", "voices.perc.pitches": [0, 3, 7, 10], "voices.shaker.pattern": "5555555555555555", "voices.woodblock.pattern": "......9.......9.", "voices.kick.pattern": "7...7...7...7...", "voices.pad.pitches": [0, 4, 7, 11], "fx.lpf": 8000, "fx.reverb": .3},
-        "prasma": {"withhold": "stab", "voices.hatC.pattern": "9393939393939393", "voices.perc.pattern": "9.9..9.9..9.9..9", "voices.perc.pitches": [0, 12], "voices.perc.decay": .060, "voices.stab.pattern": "....9...........", "voices.stab.decay": .090, "fx.lpf": 14000, "fx.reverb": .12},
-        "branding": {"withhold": "blip", "voices.blip.pattern": "9..9..9...9..9..", "voices.blip.pitches": [0, 7, 10], "voices.clap.pattern": "....9.......9...", "fx.lpf": 10000, "fx.reverb": .25},
-        "onebrain": {"withhold": "arp", "voices.arp.pattern": "9.7.5.9.7.5.9.7.", "voices.arp.pitches": [0, 3, 7, 12], "voices.arp.crush": 8, "voices.pad.pitches": [0, 2, 7], "fx.delay": .5, "fx.feedback": .5, "fx.lpf": 9000, "fx.reverb": .35},
-        "reef": {"withhold": "kickTop", "voices.bubble.randomPerBar": [1, 3], "voices.bubble.pitches": [72, 96], "voices.pad.pitches": [0, 3, 7], "voices.pad.chorus": .4, "fx.lfo.frequency": .05, "fx.lfo.min": 500, "fx.lfo.max": 3000, "fx.reverb": .6},
-        "inbox": {"withhold": None, "voices.kick.pattern": "8...8...8...8...", "voices.pad.sub": True, "voices.pad.pitches": [0], "fx.lpf": 4000, "fx.reverb": .5},
+        "core": {"withhold": "hatO", "fx.lpf": 9000, "fx.reverb": .30},
+        "episodic": {"withhold": "perc", "fx.delay": .5, "fx.reverb": .35},
+        "semantic": {"withhold": "bass", "fx.lpf": 7000, "fx.reverb": .6},
+        "procedural": {"withhold": "rim", "fx.drive": .35, "fx.reverb": .08},
+        "prospective": {"withhold": ["hatO", "perc"], "fx.sweep": [1000, 8000], "fx.sweepBars": 8, "fx.reverb": .25},
+        "working": {"withhold": "hatO", "fx.lpf": 12000, "fx.reverb": .2},
+        "jhon": {"withhold": "shaker", "fx.lpf": 8000, "fx.reverb": .3},
+        "prasma": {"withhold": "stab", "fx.gated": .11, "fx.lpf": 14000, "fx.reverb": .12},
+        "branding": {"withhold": "blip", "fx.lpf": 10000, "fx.reverb": .25},
+        "onebrain": {"withhold": "arp", "fx.delay": .5, "fx.feedback": .5, "fx.lpf": 9000, "fx.reverb": .35},
+        "reef": {"withhold": "hatC", "fx.lfo.frequency": .05, "fx.lfo.min": 500, "fx.lfo.max": 3000, "fx.reverb": .6},
+        "inbox": {"withhold": None, "fx.lpf": 4000, "fx.reverb": .5},
     }
     mismatches = []
     for room, expected in contracts.items():
@@ -272,25 +302,15 @@ def measure_rooms(engine, report):
             if actual != value:
                 mismatches.append({"room": room, "field": field, "expected": value, "actual": actual})
     report["roomContract"] = {"assertions": sum(len(fields) for fields in contracts.values()), "mismatches": mismatches}
-    report["checks"]["explicit patterns pitches effects and withhold match table"] = not mismatches
-    compass_hat = definitions.get("core", {}).get("voices", {}).get("hatO", {}).get("pattern", "")
-    report["checks"]["Compass offbeat hat velocity six"] = bool(compass_hat) and {char for char in compass_hat if char != "."} == {"6"} and all(index % 4 == 2 for index, char in enumerate(compass_hat) if char != ".")
-    period_contracts = (("core", "perc", 32), ("core", "riser", 256),
-                        ("semantic", "stab", 32), ("procedural", "clank", 64),
-                        ("prospective", "riser", 256), ("branding", "riser", 128))
-    report["checks"]["specified infrequent voice periods"] = all(
-        len(definitions.get(room, {}).get("voices", {}).get(voice, {}).get("pattern", "")) == period
-        for room, voice, period in period_contracts)
-    works_roll = definitions.get("procedural", {}).get("voices", {}).get("perc", {}).get("pattern", "")
-    report["checks"]["Works ratchet is withheld until bar four"] = len(works_roll) in (63, 64) and works_roll[:48] == "." * 48 and any(char.isdigit() for char in works_roll[48:])
+    report["checks"]["room mix effects and withhold match table"] = not mismatches
     measurements = {}
     for room in ROOM_IDS:
         print("Measuring room: " + room, flush=True)
         requested_at = engine.evaluate("""id => {
           const a = window.__vc.audio; a.setRoom(id); return a.ctx.currentTime;
         }""", room)
-        # A bar-boundary switch can take 5.14 seconds including its two-bar fade.
-        # Preserve the requested four-second wait, then finish that fade and let
+        # A switch can take up to twelve bars (20.6 seconds) to reach its phrase drop.
+        # Preserve the requested four-second wait, then wait for the drop and let
         # the shared 2.4-second synthetic reverb clear before measuring identity.
         engine.wait(4)
         wait_room(engine, room)
@@ -310,7 +330,7 @@ def measure_rooms(engine, report):
         print(f"Measured {room}: {metrics['rmsDbfs']:.3f} dBFS; "
               f"{metrics['centroidHz']:.3f} Hz centroid; {metrics['frames']['fps']:.3f} fps", flush=True)
     report["rooms"] = measurements
-    report["fingerprintMethod"] = "For each room: request it, wait four seconds, finish any remaining two-bar crossfade, let the 2.4-second shared reverb tail clear, then record four seconds of actual PCM and averaged analyser spectrum. No outgoing room is included in the identity measurement."
+    report["fingerprintMethod"] = "For each room: request it, wait four seconds, finish any remaining transition up to its drop, let the 2.4-second shared reverb tail clear, then record four seconds of actual PCM and averaged analyser spectrum. No outgoing room is included in the identity measurement."
     report["checks"]["every room audible above -40 dBFS"] = all(row["rmsDbfs"] > -40 and row["windowCount"] >= 190 for row in measurements.values())
     report["checks"]["every room context running"] = all(row["contextState"] == "running" for row in measurements.values())
     report["checks"]["every room above 55 fps"] = all(row["frames"]["fps"] > 55 for row in measurements.values())
@@ -324,6 +344,11 @@ def measure_rooms(engine, report):
                       "passed": relative_centroid >= .08 or rms_difference >= 2})
     report["roomPairs"] = pairs
     report["checks"]["all 66 room pairs differ by 8 percent centroid or 2 dB RMS"] = len(pairs) == 66 and all(pair["passed"] for pair in pairs)
+    voice_state = engine.evaluate("""() => ({voiceErrors: window.__vc.audio.diagnostics.voiceErrors,
+      lastVoiceError: window.__vc.audio.diagnostics.lastVoiceError ?? null,
+      scheduledVoices: window.__vc.audio.diagnostics.scheduledVoices})""")
+    report["voices"] = voice_state
+    report["checks"]["every Strudel voice scheduled without error"] = voice_state["voiceErrors"] == 0 and voice_state["scheduledVoices"] > 0
 
 
 def measure_timeline(engine, report):
@@ -457,11 +482,22 @@ def main():
                 report["fallback"] = audio_state(engine)
                 report["checks"]["unimplemented district falls back to skyline"] = report["fallback"]["room"] == "skyline"
                 engine.click(".chip:first-child")
-            report["crossfade"] = measure_crossfade(engine)
-            fade = report["crossfade"]
-            report["checks"]["crossfade starts at next bar"] = fade["transition"]["start"] >= fade["request"]["requestedAt"] and fade["transition"]["start"] - fade["request"]["requestedAt"] <= BAR_SECONDS + .12 and fade["barPhaseError"] is not None and fade["barPhaseError"] < 1e-5
-            report["checks"]["two-bar equal-power crossfade"] = abs(fade["transitionDurationSeconds"] - 2 * BAR_SECONDS) < .001 and fade["maxEqualPowerCurveError"] < .04
-            report["checks"]["switch envelope below 6 dB per 20 ms"] = len(fade["measuredGainWindows"]) > 150 and len(fade["missingInputWindows"]) <= 2 and fade["maxSwitchEnvelopeDeltaDb"] <= 6
+            report["transition"] = measure_transition(engine)
+            fade = report["transition"]
+            samples = fade["paramSamples"]
+            beat = BAR_SECONDS / 4
+            start, drop = fade["transition"]["start"], fade["transition"]["drop"]
+            report["checks"]["transition starts at next bar"] = fade["transition"]["start"] >= fade["request"]["requestedAt"] and fade["transition"]["start"] - fade["request"]["requestedAt"] <= BAR_SECONDS + .12 and fade["startBarPhaseError"] < 1e-5
+            report["checks"]["drop lands on an eight-bar phrase after a four to eleven bar bridge"] = fade["dropPhrasePhaseError"] < 1e-5 and 4 - 1e-6 <= fade["bridgeBars"] <= 11 + 1e-6
+            report["checks"]["new room's upper layers fade in over one bar"] = fade["fadeWindows"] > 60 and fade["maxIncomingFadeCurveError"] < .05
+            bridge = [row for row in samples if start + beat + .05 <= row["time"] <= drop - .05]
+            before_drop = [row for row in samples if row["time"] <= drop - .05]
+            after = [row for row in samples if row["time"] >= drop + .05 and row["inLow"] is not None]
+            report["checks"]["kick and bass out through the bridge"] = len(bridge) > 20 and all(row["outLow"] is not None and row["outLow"] <= .01 for row in bridge) and all(row["inLow"] is not None and row["inLow"] <= .01 for row in before_drop)
+            report["checks"]["new kick and bass slam in on the drop"] = len(after) > 3 and all(row["inLow"] >= .99 for row in after)
+            report["checks"]["one-beat cut before the drop, 20 dB deep"] = fade["grooveDbfs"] is not None and fade["cutDbfs"] is not None and fade["grooveDbfs"] - fade["cutDbfs"] >= 20 and fade["afterDropDbfs"] is not None and fade["afterDropDbfs"] > fade["cutDbfs"] + 20
+            report["checks"]["old room gone after the drop"] = fade["outgoingPostFadeRmsAfterDrop"] is not None and fade["outgoingPostFadeRmsAfterDrop"] < 1e-4
+            report["checks"]["no clipping through the transition"] = fade["peak"] < 1
             report["working"] = measure_audio(engine)
             report["checks"]["working audible and running"] = report["working"]["rmsDbfs"] > -40 and report["working"]["contextState"] == "running"
             engine.click('.chip[data-d="working"]')
@@ -494,12 +530,12 @@ def main():
     destination.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n", encoding="utf-8")
     # Exact PCM evidence stays in the report; console output stays reviewable.
     compact = dict(report)
-    if "crossfade" in compact:
-        compact["crossfade"] = {key: value for key, value in report["crossfade"].items()
-                                if key not in ("pcmWindows", "measuredGainWindows")}
+    if "transition" in compact:
+        compact["transition"] = {key: value for key, value in report["transition"].items()
+                                 if key not in ("pcmWindows", "paramSamples")}
     if "roomDefinitions" in compact:
         compact["roomDefinitions"] = {room: {key: value for key, value in definition.items()
-            if key not in ("voices", "fx")} for room, definition in report["roomDefinitions"].items()}
+            if key not in ("voices", "fx", "code", "layers")} for room, definition in report["roomDefinitions"].items()}
     if "archiveTimeline" in compact:
         compact["archiveTimeline"] = [{"week": row["week"], "existing": row["existing"],
             "lit": row["lit"], "density": row["density"], "brightness": row["brightness"],

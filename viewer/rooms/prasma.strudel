@@ -1,0 +1,9 @@
+// Prasma Campus · prasma · tight and bright in A, every hit on purpose
+setcpm(140/4)
+
+kick: s("bd*4").bank("RolandTR909").shape(.25).gain(.95)
+hatC: s("hh*16").bank("RolandTR909").gain("[.62 .25]*8").hpf(9000)
+hatO: s("[~ oh]*4").bank("RolandTR909").decay(.07).gain(.35)
+perc: s("[rim ~ rim ~ ~ rim ~ rim ~ ~ rim ~ rim ~ ~ rim]").bank("RolandTR707").gain(.6)
+stab: note("[~@4 [a3,c4,e4] ~@11]").s("square").lpf(5000).decay(.09).sustain(0).gain(.26)
+clap: s("[~ cp]*2").bank("RolandTR707").gain(.5)

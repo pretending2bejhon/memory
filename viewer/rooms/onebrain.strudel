@@ -1,0 +1,8 @@
+// The Dome · onebrain · agents thinking in D, crushed arps and machine voices
+setcpm(140/4)
+
+kick: s("bd*4").bank("RolandTR909").lpf(3000).gain(.95)
+hatC: s("[hh ~ hh:1 ~]*4").bank("RolandTR707").gain(.4)
+arp: note("d3 ~ f3 ~ a3 ~ d4 ~ f3 ~ a3 ~ d4 ~ a3 ~").s("square").crush(6).lpf(2600).decay(.2).sustain(0).gain(.22).delay(.4).delaytime(.3214).delayfeedback(.45).pan(sine.range(.25, .75).fast(2))
+vox: s("<[~@8 speakspell:3 ~@7] ~ [~@8 speakspell:7 ~@7] ~>").coarse(4).gain(.45).room(.3)
+pad: note("[d2,e2,a2]").slow(4).s("supersaw").lpf(2100).attack(1).release(2).gain(.16)

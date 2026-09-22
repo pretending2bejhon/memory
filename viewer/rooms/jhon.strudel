@@ -1,0 +1,9 @@
+// The Hills · jhon · baile funk groove in C, bouncy and warm
+setcpm(140/4)
+
+kick: s("bd*4").bank("RolandTR808").lpf(900).shape(.3).gain(.9)
+perc: s("lt ~ ~ lt ~ ~ mt ~ ~ ~ lt ~ ~ ht ~ ~").bank("RolandTR808").gain(.8).swingBy(.22, 8)
+shaker: s("sh*16").bank("RolandTR808").gain("[.35 .2 .5 .25]*4").swingBy(.22, 8)
+woodblock: s("[~@6 cb ~@7 cb ~]").bank("RolandTR808").gain(.4)
+vox: s("<~ [~@6 mouth:3 ~@9] ~ [~@12 mouth:7 ~@3]>").gain(.5).room(.25)
+pad: note("<[c3,e3,g3,b3] [a2,c3,e3,g3]>").s("supersaw").slow(2).lpf(1700).attack(.3).release(1.5).gain(.16)

@@ -4,7 +4,7 @@ The interactive viewer and Blender scene now use a shared design generated from 
 
 The local publication build masks subdistrict names with generic block labels, uses English city names throughout the visible interface, and includes the owner's introduction, home link and social preview. Source belongs on the local `main` branch; `python viewer/build.py --public` generates the separate `dist/` publication. The default build preserves private folder metadata in the local viewer pages.
 
-The browser now synthesizes twelve district rooms and the Skyline overview mix using Web Audio, with no samples or audio files. Sound requires a deliberate gesture, even when an on preference is remembered. One 140 BPM clock keeps district and ride changes aligned to the next bar, with a two-bar crossfade. The timeline's building density unmutes layers in a fixed order; building brightness controls the low-pass and reverb with 250 ms smoothing. Musical arrangements use 32-bar cycles, except The Yards at 16; Signal Row repeats a four-bar phrase.
+The browser plays twelve district rooms and the Skyline overview mix, written in Strudel with drum-machine samples and synths. Sound requires a deliberate gesture, even when an on preference is remembered. One 140 BPM clock keeps district and ride changes phrase-locked: a bass-free bridge from the next bar, a riser, a one-beat cut and the new kick and bass on the next eight-bar line. The timeline's building density unmutes layers in a fixed order; building brightness controls the low-pass and reverb with 250 ms smoothing. Musical arrangements use 32-bar cycles, except The Yards at 16; Signal Row repeats a four-bar phrase.
 
 ## Current outputs
 
@@ -24,4 +24,4 @@ The earlier visual-build QA sampled 8,746 positions across every route, includin
 
 The existing `timelapse.mp4`, `turntable.mp4` and `contact.png` belong to the original visual iteration and were not regenerated for this refresh. `LOG.md` retains that earlier design history.
 
-Public-build, collision, browser and audio evidence is reproducible with `qa_public.py`, `qa_city.py` and `qa_audio.py`. The rulings behind the build: public source on `main`, an English interface, and procedural audio with no audio files. The listening sheet at the end of this log is scored after deployment.
+Public-build, collision, browser and audio evidence is reproducible with `qa_public.py`, `qa_city.py` and `qa_audio.py`. The rulings behind the build: public source on `main`, an English interface, and room music written in Strudel (AGPL-3.0, like this repository). The listening sheet at the end of this log is scored after deployment.

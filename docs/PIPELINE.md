@@ -70,7 +70,7 @@ Reads the anonymous data and layout, generates the shared design, compacts nodes
 
 The source modules are `viewer/city-life.js`, `viewer/ride.js` and `viewer/city-audio.js`. The audio module replaces the `__CITY_AUDIO__` placeholder in the same build pass. It contains procedural Web Audio voices and room definitions; the build emits no audio directory or audio files. Sound remains off until a deliberate activation of its control, including when an on preference was remembered.
 
-The audio module defines twelve district rooms and the Skyline overview mix. All use the same 140 BPM audio clock. District focus and ride hooks request a bar-boundary switch with a two-bar crossfade. Musical arrangements cycle over 32 bars, except The Yards at 16; Signal Row's musical loop repeats every four bars. On each week update the renderer supplies district density and brightness, which control layer thresholds, low-pass cutoff and reverb with 250 ms smoothing. [VIEWER.md](VIEWER.md) documents the formulas and fixed layer order.
+The audio module plays twelve district rooms (Strudel code in `viewer/rooms/`) and the Skyline overview mix. All use the same 140 BPM audio clock. District focus and ride hooks request a switch that starts on the next bar and drops on the next eight-bar phrase. Musical arrangements cycle over 32 bars, except The Yards at 16; Signal Row's musical loop repeats every four bars. On each week update the renderer supplies district density and brightness, which control layer thresholds, low-pass cutoff and reverb with 250 ms smoothing. [VIEWER.md](VIEWER.md) documents the formulas and fixed layer order.
 
 Without flags, `python viewer/build.py` preserves the private folder metadata and writes:
 
@@ -93,7 +93,7 @@ Builds `contact.png`, a grid of the iteration renders with their scores, in Cons
 
 ## 6. Owner refresh and deployment
 
-The rulings are final: the repository is public, `main` holds the source, `gh-pages` holds the generated publication, the interface is English, and sound is procedural with no audio files. The owner creates the repository, configures its `origin` remote, and deploys after reviewing the local handoff. Building and testing locally do not create a remote or publish the site.
+The rulings are final: the repository is public, `main` holds the source, `gh-pages` holds the generated publication, the interface is English, and the room music is Strudel code in `viewer/rooms/`. The owner creates the repository, configures its `origin` remote, and deploys after reviewing the local handoff. Building and testing locally do not create a remote or publish the site.
 
 To refresh from the owner's vault:
 
@@ -111,7 +111,7 @@ python -m http.server 8765 --bind 127.0.0.1
 
 In another terminal run `python qa_public.py`, `python qa_city.py --url http://127.0.0.1:8765/dist/ --prefix public` and `python qa_audio.py --phase p2 --url http://127.0.0.1:8765/dist/ --prefix public`. Browser QA must report zero collisions and zero page errors; the public page must expose 1,246 nodes, and screenshots must include desktop and 375 px views in `renders/qa/`.
 
-`python qa_audio.py` shares the browser harness with `python qa_city.py`. Audio gates cover autoplay prevention, context activation, signal level, bar-boundary crossfade continuity, frame rate with sound on and console errors. The full room check waits for each switch to settle, then samples for four seconds; all twelve rooms must be non-silent, and every pair must differ by at least 8 percent in spectral centroid or 2 dB in RMS. The Archive check scrubs weeks 0 through 12 and tests cutoff against measured brightness, which may rise or fall over chronological time. Run both suites after changing the engine or viewer hooks. Keep their fresh command output in the handoff; a successful build alone is not an audio check.
+`python qa_audio.py` shares the browser harness with `python qa_city.py`. Audio gates cover autoplay prevention, context activation, signal level, the phrase-locked transition, frame rate with sound on and console errors. The full room check waits for each switch to settle, then samples for four seconds; all twelve rooms must be non-silent, and every pair must differ by at least 8 percent in spectral centroid or 2 dB in RMS. The Archive check scrubs weeks 0 through 12 and tests cutoff against measured brightness, which may rise or fall over chronological time. Run both suites after changing the engine or viewer hooks. Keep their fresh command output in the handoff; a successful build alone is not an audio check.
 
 After the gates pass, the owner publishes:
 
