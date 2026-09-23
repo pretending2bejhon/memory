@@ -38,3 +38,11 @@ Both renderers consume `data/city-design.json`. Blender creates discrete window 
 The 15 navigable street loops are distinct from the knowledge-link overlay. Each route is validated against all nearby building footprints, including facade overhangs. Rounded corners and arc-length sampling keep vehicles and the camera on the same continuous road. Adjacent walking lanes are checked separately. Street lighting and citizens are ambient scenery, while the note buildings retain their timeline and decay rules.
 
 Knowledge links retain their appearance weeks and can be enabled in the viewer. They are hidden in the default overview and final Blender render so the actual street network remains readable.
+
+## Viewer scenery light
+
+The browser's sky, beams, drones, fireworks, grid and mounted screens are procedural scenery. They use the shared visual beat bus and light limiter. Their colour and amplitude can follow the active room; a note building's window light cannot. Roof screens are separate panels, and the note-building instance buffers and window-mask/light terms remain independent of music.
+
+Room changes follow bridge, riser, one-beat cut and drop. In Full, the cut dims reactive scenery to 15 percent while note windows and street lamps remain steady. Soft halves reactive amplitude, uses a 50-percent cut and removes strobes. Calm uses 20-percent amplitude with no flashes, blackout or strobes, and colour changes take at least one bar. Overview and district focus apply a further 0.6 factor. Reduced motion forces Calm and freezes ambient motion.
+
+The grid ripple starts at the active district centre until stages are built, then at its stage; overview uses the Compass. Fireworks follow the room arrangement's return phase, including bar 10 in the Yards, rather than every transition drop. These viewer layers do not change the shared architecture, note census or decay rules, and are not added to the Blender renders.

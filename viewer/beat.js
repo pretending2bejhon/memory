@@ -163,7 +163,9 @@ function createBeat(audio) {
           transition.start += shift; transition.riser += shift; transition.cut += shift; transition.drop += shift;
           transition.source = 'silent'; transition.intensity = .5;
         }
-        desired = audio.desired; silentEighth = Math.floor(current / (BEAT * .5));
+        // Reconcile any room request the audio scheduler has not started yet.
+        desired = transition.active ? transition.to : room;
+        silentEighth = Math.floor(current / (BEAT * .5));
         // Already scheduled notes stop being audible once Sound is disabled.
         for (let i = audio.hitRing.read; i < audio.hitRing.written; i++) audio.hitRing.slots[i % audio.hitRing.capacity].released = true;
         audio.hitRing.read = audio.hitRing.written;

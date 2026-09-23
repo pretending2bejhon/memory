@@ -61,7 +61,7 @@ The room's timeline low-pass target is `600 + brightness * 11400` Hz, and its re
 - `viewer/crowd.js`: instanced citizens.
 - `viewer/society.js`: instanced traffic and society.
 - `viewer/beat.js`: the shared drop function, audible visual clock and preallocated hit-ring reader.
-- `viewer/rave-light.js`: the common light limiter, Lights setting and adaptive quality governor.
+- `viewer/rave-light.js`: procedural sky, lasers, searchlights, drone glyphs, fireworks, grid floor and mounted screens, plus the common light limiter, Lights setting and adaptive quality governor.
 - `viewer/ride.js`: ride camera, sightline checks and saved overview state.
 - `viewer/city-audio.js`: audio-clock scheduler, Strudel loading and compilation, orbit routing, room buses, transitions and Sound preference.
 - `viewer/rooms/*.strudel`: the twelve rooms as Strudel code.
@@ -98,3 +98,17 @@ Desktop starts at Tier 3 and phones at Tier 1. A three-second mean above 19 ms d
 `qa_world.py --phase v0` measures the scenes available in that phase: week-12 overview, the existing Lantern avenue ride, and an overview focus transition. A five-minute scripted session visits every district, plays the timeline and rides for 60 seconds to measure heap growth. From V2 it also measures the Downtown stage. Future bridge, bike and lake scenes are explicitly deferred to their Run B phases. Each scene reports the governor's settled tier; desktop may settle at Tier 2 but not Tier 1. Flash checks use means over 21 by 12 cells, moved in four-cell steps over a 64 by 36 relative-luminance trace, across each existing mode and Lights setting.
 
 The world budgets apply from V0: at least 55 fps, p95 frame time at most 22 ms, no frame above 100 ms after load, at most 320 draw calls and 1.5 million triangles, at most 40 MB heap growth in the scripted session, and at most 900,000 bytes for the public page. Run the browser suites with the Python 3.11 launcher above; the complete audio command includes `qa_audio.py --phase p2`, and the world command includes the current `--phase v<n>`. All existing city gates and all 36 audio checks stay binding.
+
+## Rave light
+
+The sky uses the active room's colour, an accent 150 degrees around the hue wheel and the night base. Kicks lift the horizon, hats sparkle the stars, and pad and stab energy light the aurora. A low cloud deck carries the drop flash. These effects use the shared limiter and the selected Lights amplitude.
+
+At Tier 3, eight lasers rise from the Compass spire and six from the three tallest Downtown towers. Fan, sweep, scissor, tunnel and converge-up patterns change on bars and phrases. Four broad searchlights sweep from the Works and Yards over two bars. The 256-point swarm above the Compass morphs into a procedural district glyph at the arrangement-cycle boundary. Tier 2 uses ten lasers and 128 drones; Tier 1 uses six lasers and no drones.
+
+With Sound on, Tier 3 fireworks launch three to six shells over the active district on its arrangement's first return bar: bar 22 of a 32-bar cycle, or bar 10 of the Yards' 16-bar cycle. The Gate uses cycle bar 0. Lower tiers reduce the particles and shells. This happens at most once per cycle and is distinct from a room-transition drop; the silent clock has no arrangement.
+
+The four light-transition steps use the engine's times. At bridge start, sky and lasers desaturate over two bars while beams narrow and rise. The riser starts at the later of bridge start and four bars before the drop; beams converge and the horizon rises on beats. On a four-bar bridge these two starts coincide. The final beat dims reactive light to 15 percent in Full, 50 percent in Soft, and leaves it undimmed in Calm. The drop changes to the new room colour, fans the lasers, flashes the clouds and launches a grid ripple. With Sound off, the same grammar runs at half intensity on the silent clock. Stages, crowds and storefronts join this grammar in the phases that introduce them.
+
+The floor shader draws unit grid lines with stronger lines every eight units. Kick ripples travel at 20 units per second and fade over 1.5 seconds. Before stages arrive, their source is the active district centre; overview uses the Compass. Framed screens mount on the six tallest Downtown crowns and roofs and on Signal Row billboards. Spectrum bars, waveform rings, kaleidoscopes and curated scrolling lines stay on separate panels, clear of the note-window signal.
+
+`qa_world.py --phase v1` adds transition timing within one rendered frame and byte comparisons of note-building instance buffers across complete transitions with Sound on and off. The shader check preserves the existing sources of every window-mask and light term. City, audio, flash, memory and performance gates remain required.

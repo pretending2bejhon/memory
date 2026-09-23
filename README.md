@@ -4,7 +4,7 @@ A second brain rendered as a living cyberpunk night city.
 
 Live: [jhonalbert.com/memory/](https://jhonalbert.com/memory/). The owner publishes this route after the local build and gates pass.
 
-Tall illuminated districts, rain on dark streets, walking citizens, and a street-level ride through the Archive and around the city. The editable Blender scene includes an overview camera and a second camera on Lantern avenue.
+Tall illuminated districts, rain on dark streets, walking citizens, and a street-level ride through the Archive and around the city. The browser sky, lasers, drone glyphs, roof screens and grid floor follow the room music while note windows retain their decay signal. The editable Blender scene includes an overview camera and a second camera on Lantern avenue.
 
 Every note in an Obsidian vault becomes a building. Every `[[wikilink]]` becomes a road. The vault's folders become districts, each with its own architecture and colour. Time runs from the week the vault started to today, thirteen weekly frames, so you can watch the city grow and watch old streets go dark when nobody touches their notes any more.
 
@@ -63,6 +63,8 @@ Modes: `iter` (quick Workbench still), `final` (EEVEE still with bloom), `timela
 
 Click Sound beside View, or press `M`, to turn sound on. It starts off and requires a deliberate gesture even when the browser remembers an on preference. Each of the twelve districts has its own room, and overview plays Downtown's distant Skyline mix. Room changes ride the shared 140 BPM clock the way a DJ mixes: a bass-free bridge, a riser, a one-beat cut and the new room's kick and bass slamming in on an eight-bar phrase. Scrubbing time adds voices as buildings appear and changes the filter and reverb as their lights fade.
 
+The viewer mirrors those transitions in its scenery: colour drains through the bridge, beams rise with the riser, the cut dims reactive light for one beat, and the new room returns with a cloud flash and grid ripple. With Sound off the visual clock continues quietly. Choose Full, Soft or Calm under Lights in View; reduced motion forces Calm. Windows and street lamps stay independent of the music.
+
 The music is written in [Strudel](https://strudel.cc/), the browser port of TidalCycles. Each room is one plain file in `viewer/rooms/<room>.strudel`: paste it into strudel.cc to hear and change it, paste it back and rebuild. Each labelled line (`kick:`, `hatC:`, `pad:`) is one layer; the labels drive the timeline mix, so keep the names. Strudel and its samples load from public CDNs on the first Sound gesture (jsdelivr, strudel.b-cdn.net, the TidalCycles Dirt-Samples on GitHub), so sound needs a network connection. With sound on, `cityAudio.code('working')` in the browser console prints a room, and `cityAudio.setCode('working', code)` swaps it live without a rebuild. See [docs/VIEWER.md](docs/VIEWER.md) for controls and audio verification, and [LOG.md](LOG.md) for the owner's listening sheet.
 
 ## What is in the repository
@@ -76,7 +78,7 @@ The music is written in [Strudel](https://strudel.cc/), the browser port of Tida
 | `contact.py` | Contact sheet of the design iterations with their scores (Pillow) |
 | `viewer/template.html`, `viewer/city-life.js`, `viewer/ride.js` | Interactive city, street life and ride camera |
 | `viewer/city-audio.js` | Sound engine: 140 BPM transport, room buses, phrase-locked DJ transitions and timeline mix around Strudel |
-| `viewer/beat.js`, `viewer/rave-light.js` | Shared visual beat clock, light limiter, Lights setting and adaptive quality |
+| `viewer/beat.js`, `viewer/rave-light.js` | Shared visual beat clock, procedural sky and rave light, light limiter, Lights setting and adaptive quality |
 | `viewer/crowd.js`, `viewer/society.js` | Instanced citizens and traffic, split from street geometry |
 | `viewer/rooms/*.strudel` | The twelve rooms as Strudel code, one file per district |
 | `qa_city.py`, `qa_audio.py`, `qa_world.py` | Shared browser harness for city geometry, interaction, sound and performance gates |

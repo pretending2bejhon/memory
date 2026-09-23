@@ -73,6 +73,8 @@ The source modules are `viewer/city-life.js`, `viewer/ride.js`, `viewer/city-aud
 
 The audio module plays twelve district rooms (Strudel code in `viewer/rooms/`) and the Skyline overview mix. All use the same 140 BPM audio clock. District focus and ride hooks request a switch that starts on the next bar and drops on the next eight-bar phrase. Musical arrangements cycle over 32 bars, except The Yards at 16; Signal Row's musical loop repeats every four bars. On each week update the renderer supplies district density and brightness, which control layer thresholds, low-pass cutoff and reverb with 250 ms smoothing. [VIEWER.md](VIEWER.md) documents the formulas and fixed layer order.
 
+The beat module reads scheduled layer hits and the audible output clock without scheduling audio itself. The rave-light module builds the procedural sky, beams, drone glyphs, fireworks, grid and mounted screens, and drives their four-step room transition. Note-window light remains outside this system. All world and postprocessing materials compile before the page is ready. These visual layers add no image, model or font assets and require no additional external loads.
+
 Without flags, `python viewer/build.py` preserves the private folder metadata and writes:
 
 - `viewer/index.html`: a complete document you can open locally.
@@ -110,12 +112,12 @@ Start the local server and run the browser gates:
 python -m http.server 8765 --bind 127.0.0.1
 ```
 
-In another terminal run `python qa_public.py`, then the browser suites below. The local browser harness requires Python 3.11. Select the phase that the sources implement; `v0` is the foundations phase, and Run A ends at `v3`.
+In another terminal run `python qa_public.py`, then the browser suites below. The local browser harness requires Python 3.11. Select the phase that the sources implement; `v0` is foundations, `v1` adds rave light, and Run A ends at `v3`.
 
 ```powershell
 py -V:Astral/CPython3.11.15 qa_city.py --url http://127.0.0.1:8765/dist/ --prefix public
 py -V:Astral/CPython3.11.15 qa_audio.py --phase p2 --url http://127.0.0.1:8765/dist/ --prefix public
-py -V:Astral/CPython3.11.15 qa_world.py --phase v0 --url http://127.0.0.1:8765/dist/ --prefix public
+py -V:Astral/CPython3.11.15 qa_world.py --phase v1 --url http://127.0.0.1:8765/dist/ --prefix public
 ```
 
 Browser QA must report zero collisions and zero page errors, all 36 audio checks, and every world gate for the implemented phase. The public page must expose 1,246 nodes, and screenshots must include desktop and 375 px views in `renders/qa/`. World reports list the scenes measured, their settled tiers and the phase-scoped performance budgets; future scenes are not marked passed before they exist.

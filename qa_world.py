@@ -5,8 +5,11 @@ mean luminance in sliding 21 by 12 windows, never a union of pixel events.
 """
 
 import argparse
+import hashlib
 import json
 import math
+import re
+import subprocess
 import time
 from pathlib import Path
 
@@ -43,18 +46,21 @@ FRAME_TRACE = """() => {
 LUMINANCE_TRACE = """() => {
   const canvas=document.createElement('canvas');canvas.width=64;canvas.height=36;
   const ctx=canvas.getContext('2d',{willReadFrequently:true});
-  const source=window.__vc.renderer.domElement,start=performance.now();
-  const trace=window.__qaWorldFlash={done:false,times:[],frames:[],start};
-  const linear=v=>v<=.04045?v/12.92:Math.pow((v+.055)/1.055,2.4);let next=0;
+  const source=window.__vc.renderer.domElement,times=new Float64Array(901),
+    values=new Uint32Array(901*64*36),linear=new Float64Array(256);
+  for(let i=0;i<256;i++){const v=i/255;linear[i]=v<=.04045?v/12.92:Math.pow((v+.055)/1.055,2.4);}
+  const start=performance.now();
+  const trace=window.__qaWorldFlash={done:false,count:0,
+    times,values,start};let next=0;
   function tick(now){
     const elapsed=now-start;
     if(elapsed>=next&&elapsed<30000){
       ctx.drawImage(source,0,0,64,36);
-      const pixels=ctx.getImageData(0,0,64,36).data,values=new Array(64*36);
-      for(let i=0;i<values.length;i++)values[i]=Math.round(1000000*(
-        .2126*linear(pixels[i*4]/255)+.7152*linear(pixels[i*4+1]/255)+
-        .0722*linear(pixels[i*4+2]/255)))/1000000;
-      trace.times.push(elapsed);trace.frames.push(values);next+=1000/30;
+      const pixels=ctx.getImageData(0,0,64,36).data,offset=trace.count*64*36;
+      for(let i=0;i<64*36;i++)trace.values[offset+i]=Math.round(1000000*(
+        .2126*linear[pixels[i*4]]+.7152*linear[pixels[i*4+1]]+
+        .0722*linear[pixels[i*4+2]]));
+      trace.times[trace.count++]=elapsed;next+=1000/30;
     }
     if(elapsed>=30000){trace.done=true;return;}
     requestAnimationFrame(tick);
@@ -274,7 +280,12 @@ def measure_flash(engine, mode, setting, path, baseline=False):
     engine.evaluate("""() => {const a=window.__vc.audio;
       a.setRoom(a.room==='procedural'?'working':'procedural');}""")
     wait_probe(engine, "() => window.__qaWorldFlash.done", 45)
-    trace = engine.evaluate("() => window.__qaWorldFlash")
+    trace = engine.evaluate("""() => {
+      const q=window.__qaWorldFlash;
+      return {done:q.done,start:q.start,times:Array.from(q.times.subarray(0,q.count)),
+        frames:Array.from({length:q.count},(_,i)=>
+          Array.from(q.values.subarray(i*64*36,(i+1)*64*36),value=>value/1000000))};
+    }""")
     path("world-luminance-" + mode + "-" + setting.lower() + ".json").write_text(
         json.dumps(trace, separators=(",", ":")), encoding="utf-8")
     return {"mode": mode, "setting": setting, **flash_summary(trace)}
@@ -386,6 +397,377 @@ def measure_foundations(engine, path):
     return value, checks
 
 
+def shader_light_dependencies(shader):
+    """Conservative dependency closure for every mask/light assignment."""
+    shader = re.sub(r"/\*.*?\*/|//[^\n]*", "", shader, flags=re.S)
+    uniforms = set(re.findall(r"uniform\s+\w+\s+(\w+)", shader))
+    dependencies = {}
+    for statement in shader.split(";"):
+        match = re.search(r"\b([A-Za-z_]\w*)\s*(?:[+*/-]?=)(?!=)(.*)$", statement, re.S)
+        if match:
+            name, expression = match.groups()
+            dependencies.setdefault(name, set()).update(re.findall(r"\b[A-Za-z_]\w*\b", expression))
+    for match in re.finditer(r"\b(?:float|vec[234]|mat[234]|bool|int)\s+(\w+)\s*\([^)]*\)\s*\{", shader):
+        depth, end = 1, match.end()
+        while end < len(shader) and depth:
+            depth += (shader[end] == "{") - (shader[end] == "}")
+            end += 1
+        dependencies.setdefault(match.group(1), set()).update(
+            re.findall(r"\b[A-Za-z_]\w*\b", shader[match.end():end]))
+    result = {}
+    for root in ("mask", "light"):
+        pending, seen = [root], set()
+        while pending:
+            name = pending.pop()
+            if name in seen:
+                continue
+            seen.add(name)
+            pending.extend(dependencies.get(name, ()))
+        result[root] = sorted(seen & uniforms)
+    return result
+
+
+def verify_city_shader(engine):
+    original = subprocess.run(["git", "show", "e5bf9d3:viewer/template.html"], cwd=ROOT,
+                              check=True, capture_output=True, text=True, encoding="utf-8").stdout
+    material = original.split("const cityMat =", 1)[1].split("function instanced", 1)[0]
+    baseline = material.split("fragmentShader: `", 1)[1].split("`", 1)[0]
+    current = engine.evaluate("() => window.__vc.cityMat.fragmentShader")
+    old, new = shader_light_dependencies(baseline), shader_light_dependencies(current)
+    def assignments(shader):
+        clean = re.sub(r"/\*.*?\*/|//[^\n]*", "", shader, flags=re.S)
+        return [re.sub(r"\s+", "", match.group()) for match in
+                re.finditer(r"\b(?:mask|light)\s*[+*/-]?=(?!=)[^;]+;", clean)]
+    original_terms, current_terms = assignments(baseline), assignments(current)
+    retained = iter(current_terms)
+    protected_terms_intact = all(any(term == actual for actual in retained) for term in original_terms)
+    return {"baselineCommit": "e5bf9d3", "baselineUniformDependencies": old,
+            "currentUniformDependencies": new,
+            "baselineLightTerms": original_terms, "currentLightTerms": current_terms,
+            "protectedLightTermsIntact": protected_terms_intact,
+            "baselineFragmentSHA256": hashlib.sha256(baseline.encode()).hexdigest(),
+            "currentFragmentSHA256": hashlib.sha256(current.encode()).hexdigest(),
+            "passed": protected_terms_intact and all(set(new[key]) <= set(old[key]) for key in old)}
+
+
+def measure_transition(engine, path, sound):
+    print("Measuring V1 full transition, sound " + ("on" if sound else "off"), flush=True)
+    set_mode(engine, "overview")
+    if bool(engine.evaluate("() => window.__vc.audio.enabled")) != sound:
+        engine.click("#sound")
+    if sound:
+        wait_audio(engine)
+    engine.evaluate("() => window.__vc.lights.setSetting('Full')")
+    try:
+        wait_probe(engine, """() => {const v=window.__vc,b=v.beat,a=v.audio;
+          return !b.transition.active&&(b.sound?a.room===a.desired&&!a.transition:b.room===a.desired);}""", 40)
+    except RuntimeError as error:
+        state = engine.evaluate("""() => {const v=window.__vc;return {
+          audioRoom:v.audio.room,desired:v.audio.desired,beatRoom:v.beat.room,
+          sound:v.beat.sound,audioTransition:v.audio.transition,visualTransition:v.beat.transition};}""")
+        raise RuntimeError(str(error) + "; observed state " + json.dumps(state)) from error
+    engine.wait(.5)
+    engine.evaluate("""() => {
+      const v=window.__vc,b=v.beat,r=v.rave;
+      if(!r)throw new Error('Rave renderer unavailable');
+      const q=window.__qaTransition={events:[],frames:[],buffers:[],changed:[],offs:[],
+        active:true,done:false,checks:0,started:performance.now(),nodeCount:v.nodes.length,
+        noteInstances:0,source:b.sound?'audio':'silent',schedule:null};
+      const target=v.audio.room==='procedural'?'working':'procedural';
+      function schedule(){
+        if(q.schedule)return;
+        const tr=b.sound?v.audio.transition:b.transition;
+        if(tr&&tr.to===target)q.schedule={bridge:tr.start,riser:Math.max(tr.start,tr.drop-4*b.barSeconds),
+          cut:tr.drop-b.beatSeconds,drop:tr.drop,target};
+      }
+      for(const [kind,set] of Object.entries(v.kinds)){
+        q.noteInstances+=set.mesh.count;
+        const arrays={instanceMatrix:set.mesh.instanceMatrix};
+        if(set.mesh.instanceColor)arrays.instanceColor=set.mesh.instanceColor;
+        for(const [name,attr] of Object.entries(set.mesh.geometry.attributes))
+          if(attr.isInstancedBufferAttribute)arrays[name]=attr;
+        for(const [name,attribute] of Object.entries(arrays)){
+          const a=attribute.array,bytes=new Uint8Array(a.buffer,a.byteOffset,a.byteLength);
+          q.buffers.push({name:kind+'/'+name,attribute,bytes:bytes.slice(),different:false});
+        }
+      }
+      for(const name of ['bridge','riser','cut','drop'])q.offs.push(b.on(name,tr=>{
+        schedule();
+        const d=b.diagnostics,ctx=v.audio.ctx,stamp=ctx?.getOutputTimestamp?.();
+        const at=stamp?.performanceTime>0?
+          stamp.contextTime+(d.lastFrameMs-stamp.performanceTime)/1000:
+          (ctx?.currentTime??0)-(Number(ctx?.outputLatency)||Number(ctx?.baseLatency)||0);
+        const expected=q.schedule[name];
+        q.events.push({name,frame:d.frame,frameMs:d.lastFrameMs,frameGapMs:d.frameGapMs,
+          expected,actual:q.source==='audio'?at:b.now().seconds,
+          source:tr.source,serial:tr.serial});
+      }));
+      b.setRoom(target);
+      schedule();
+      function tick(){
+        if(!q.active)return;
+        schedule();
+        for(const entry of q.buffers){
+          const a=entry.attribute.array,bytes=new Uint8Array(a.buffer,a.byteOffset,a.byteLength);
+          if(bytes.length!==entry.bytes.length){entry.different=true;}
+          else for(let i=0;i<bytes.length;i++)if(bytes[i]!==entry.bytes[i]){entry.different=true;break;}
+        }
+        q.checks++;
+        const uniforms={};
+        for(const [name,u] of Object.entries(r.uniforms)){
+          const value=u.value;
+          if(typeof value==='number')uniforms[name]=value;
+          else if(value?.isColor)uniforms[name]=[value.r,value.g,value.b];
+        }
+        q.frames.push({frame:b.diagnostics.frame,frameMs:b.diagnostics.lastFrameMs,
+          stage:r.transition.stage,uniforms});
+        const drop=q.events.find(e=>e.name==='drop');
+        if(drop&&b.diagnostics.lastFrameMs-drop.frameMs>=b.barSeconds*1000){
+          q.active=false;q.done=true;for(const off of q.offs)off();return;
+        }
+        requestAnimationFrame(tick);
+      }
+      requestAnimationFrame(tick);
+    }""")
+    wait_probe(engine, "() => window.__qaTransition.done", 40)
+    value = engine.evaluate("""() => {const q=window.__qaTransition;return {
+      events:q.events,frames:q.frames,source:q.source,schedule:q.schedule,
+      nodeCount:q.nodeCount,noteInstances:q.noteInstances,frameComparisons:q.checks,
+      buffers:q.buffers.map(e=>({name:e.name,bytes:e.bytes.length,different:e.different})),
+      changed:q.buffers.filter(e=>e.different).map(e=>e.name)};}""")
+    names = [item["name"] for item in value["events"]]
+    value["timingPass"] = names == ["bridge", "riser", "cut", "drop"] and all(
+        -.25 <= (event["actual"] - event["expected"]) * 1000 <= event["frameGapMs"] + .25
+        for event in value["events"])
+    value["buffersPass"] = (value["nodeCount"] == value["noteInstances"] == 1246 and
+                            value["frameComparisons"] >= 200 and not value["changed"])
+    stages = {"bridge": 1, "riser": 2, "cut": 3, "drop": 4}
+    rendered_steps = []
+    for event in value["events"]:
+        frame = next((row for row in value["frames"] if row["frame"] == event["frame"]), None)
+        effective = max(stages[item["name"]] for item in value["events"]
+                        if item["frame"] == event["frame"])
+        uniforms = frame["uniforms"] if frame else {}
+        rendered_steps.append({"name": event["name"], "frame": event["frame"],
+                               "effectiveStage": effective, "uniforms": uniforms,
+                               "passed": uniforms.get("uStage") == effective and
+                               abs(uniforms.get("uCut", -1) - (.15 if effective == 3 else 1)) < 1e-6 and
+                               abs(uniforms.get("uSourceIntensity", -1) - (1 if sound else .5)) < 1e-6})
+    value["renderedSteps"] = rendered_steps
+    value["renderPass"] = len(rendered_steps) == 4 and all(row["passed"] for row in rendered_steps)
+    path("world-transition-" + ("on" if sound else "off") + ".json").write_text(
+        json.dumps(value, indent=2), encoding="utf-8")
+    value["frameCount"] = len(value["frames"])
+    value.pop("frames")
+    return value
+
+
+RAVE_SNAPSHOT = """() => {
+  const v=window.__vc,r=v.rave;
+  if(!r)return null;
+  const meshNames=['sky','lasers','searchlights','drones','fireworks','grid','screens','screenFrames'];
+  const meshes={};
+  for(const name of meshNames){
+    const mesh=r[name],mat=mesh?.material;
+    meshes[name]={exists:Boolean(mesh),inScene:Boolean(mesh&&v.scene.getObjectById(mesh.id)),
+      type:mesh?.type,count:mesh?.isInstancedMesh?mesh.count:null,
+      positionCount:mesh?.geometry?.attributes.position?.count??null,
+      drawCount:mesh?.geometry?.drawRange.count??null,
+      sharedCut:mat?.uniforms?.uCut===r.uniforms.uCut,
+      compiled:Boolean(mat&&v.renderer.properties.get(mat).programs?.size)};
+  }
+  const glyphs={};
+  for(const [name,points] of Object.entries(r.glyphs)){
+    const values=ArrayBuffer.isView(points)?Array.from(points):points.flatMap(p=>Array.isArray(p)?p:[p.x,p.y,p.z]);
+    let sum=0,weighted=0;for(let i=0;i<values.length;i++){sum+=values[i];weighted+=values[i]*(i+1);}
+    glyphs[name]={count:values.length/3,finite:values.every(Number.isFinite),sum,weighted};
+  }
+  const tallest=v.nodes.filter(n=>n.district==='working').slice().sort((a,b)=>b.h-a.h);
+  const signNodes=v.nodes.filter(n=>n.district==='branding'&&n.kind==='sign');
+  const hosts=r.screenHosts.map(n=>typeof n==='number'?n:(n.id??n.host??n.node));
+  const uniforms={};for(const [name,u] of Object.entries(r.uniforms)){
+    const x=u.value;if(typeof x==='number')uniforms[name]=x;
+    else if(x?.isColor)uniforms[name]=[x.r,x.g,x.b];
+  }
+  return {tier:v.tier.current,meshes,glyphs,patterns:r.patterns,screenHosts:hosts,
+    expectedScreenHosts:[...tallest.slice(0,6),...signNodes].map(n=>n.id),uniforms,
+    laserOrigins:r.laserOrigins.map(p=>({x:p.x,y:p.y,z:p.z})),
+    expectedLaserHosts:[v.nodes.filter(n=>n.district==='core').sort((a,b)=>b.h-a.h)[0],...tallest.slice(0,3)]
+      .map(n=>({id:n.id,x:n.x,z:-n.y}))};
+}"""
+
+
+def verify_rave_inventory(engine):
+    value = engine.evaluate(RAVE_SNAPSHOT)
+    if not value:
+        return {"available": False}, {"all eight rave render layers exist and compile": False}
+    meshes, current = value["meshes"], value["tier"]
+    expected_lasers = {3: 14, 2: 10, 1: 6}[current]
+    expected_drones = {3: 256, 2: 128, 1: 0}[current]
+    origins, hosts = value["laserOrigins"], value["expectedLaserHosts"]
+    origin_counts = [sum(abs(p["x"] - host["x"]) < .001 and abs(p["z"] - host["z"]) < .001
+                         for p in origins) for host in hosts]
+    glyphs = value["glyphs"]
+    return value, {
+        "all eight rave render layers exist and compile": all(
+            row["exists"] and row["inScene"] and row["compiled"] for row in meshes.values()),
+        "sky lasers grid and screens share rendered cut uniform": all(
+            meshes[name]["sharedCut"] for name in ("sky", "lasers", "grid", "screens")),
+        "laser and drone counts follow current tier": meshes["lasers"]["count"] == expected_lasers and
+            meshes["drones"]["drawCount"] == expected_drones,
+        "four searchlights at Tier 3": meshes["searchlights"]["count"] == 4 if current == 3 else
+            0 < meshes["searchlights"]["count"] <= 4,
+        "laser origins are Compass and three tallest Downtown roofs": len(origins) == 14 and
+            origin_counts == [8, 2, 2, 2],
+        "five laser patterns": set(value["patterns"]) == {
+            "fan", "sweep", "scissor", "tunnel", "converge-up"},
+        "twelve distinct 256-point drone glyphs": set(glyphs) == set(ROOM_IDS) and
+            all(row["count"] == 256 and row["finite"] for row in glyphs.values()) and
+            len({(round(row["sum"], 5), round(row["weighted"], 5)) for row in glyphs.values()}) == 12,
+        "mounted screens cover six Downtown roofs and all Signal Row billboards":
+            sorted(value["screenHosts"]) == sorted(value["expectedScreenHosts"]) and
+            meshes["screens"]["count"] == len(value["expectedScreenHosts"]),
+    }
+
+
+def measure_rave_dynamics(engine, path):
+    print("Measuring V1 Yards arrangement return and rendered kick ripples, 32 seconds", flush=True)
+    if not engine.evaluate("() => window.__vc.audio.enabled"):
+        engine.click("#sound")
+    wait_audio(engine)
+    engine.evaluate("() => {window.__vc.lights.setSetting('Full');window.__vc.beat.setRoom('prospective');}")
+    wait_probe(engine, """() => {const v=window.__vc;return v.audio.room==='prospective'&&
+      !v.audio.transition&&!v.beat.transition.active;}""", 40)
+    engine.evaluate("""() => {
+      const v=window.__vc,r=v.rave,b=v.beat,start=performance.now();
+      const q=window.__qaRaveDynamics={done:false,kicks:[],shells:[],frames:0,
+        history:r.diagnostics.shellHistory.filter(x=>x.room).map(x=>({...x})),
+        gridShader:r.grid.material.fragmentShader,
+        beforeLaser:Array.from(r.lasers.instanceMatrix.array),
+        beforeSearch:Array.from(r.searchlights.instanceMatrix.array),
+        beforeTime:r.uniforms.uTime.value};
+      let eventCount=r.diagnostics.fireworkEvents;
+      const off=b.on('hit',h=>{
+        if(h.layer!=='kick'||h.gain<=0)return;
+        const now=b.diagnostics.lastFrameMs/1000;
+        const ripples=r.grid.material.uniforms.uRipples.value;
+        q.kicks.push({room:h.room,gain:h.gain,time:now,
+          ripples:ripples.filter(x=>Math.abs(x.z-now)<.000001).map(x=>x.toArray())});
+      });
+      function tick(){
+        q.frames++;
+        if(r.diagnostics.fireworkEvents!==eventCount){
+          for(let i=eventCount;i<r.diagnostics.fireworkEvents;i++){
+            const row=r.diagnostics.shellHistory[i%r.diagnostics.shellHistory.length];
+            q.shells.push({...row,tier:v.tier.current,drawn:r.fireUniforms.uShells.value.map(x=>x.toArray()),
+              clock:r.fireworks.material.uniforms.uClock.value,
+              particleLimit:r.fireworks.material.uniforms.uParticleLimit.value,
+              frameObserved:b.diagnostics.frame});
+          }
+          eventCount=r.diagnostics.fireworkEvents;
+        }
+        if(performance.now()-start>=32000){
+          q.afterLaser=Array.from(r.lasers.instanceMatrix.array);
+          q.afterSearch=Array.from(r.searchlights.instanceMatrix.array);q.afterTime=r.uniforms.uTime.value;
+          q.done=true;off();return;
+        }
+        requestAnimationFrame(tick);
+      }
+      requestAnimationFrame(tick);
+    }""")
+    wait_probe(engine, "() => window.__qaRaveDynamics.done", 40)
+    value = engine.evaluate("() => window.__qaRaveDynamics")
+    shells = value["shells"]
+    history = value["history"] + shells
+    events = {(row["room"], row["bar"], row["at"]): row for row in history}.values()
+    cycles = [(row["room"], row["cycle"]) for row in events]
+    correct_returns = all(row["bar"] % (16 if row["room"] == "prospective" else 32) ==
+                          (0 if row["room"] == "inbox" else 10 if row["room"] == "prospective" else 22)
+                          for row in events)
+    layout = json.loads((ROOT / "data" / "layout.json").read_text(encoding="utf-8"))
+    design = json.loads((ROOT / "data" / "city-design.json").read_text(encoding="utf-8"))
+    ripple_origins = True
+    for row in value["kicks"]:
+        district = "core" if row["room"] == "skyline" else row["room"]
+        stage = next((s for s in design.get("stages", []) if s["district"] == district), None)
+        plateau = layout["districts"][district]
+        # Plateau centers use the same two-decimal serialization as viewer/build.py.
+        x, z = (stage["x"], -stage["y"]) if stage else (round(plateau["cx"], 2), -round(plateau["cy"], 2))
+        ripple_origins &= any(abs(ripple[0] - x) < .001 and abs(ripple[1] - z) < .001
+                              for ripple in row["ripples"])
+    value["rippleOriginReference"] = {"plateauSerializationDecimals": 2,
+                                     "stageCoordinates": "generated design", "tolerance": .001}
+    checks = {
+        "fireworks follow arrangement return once per cycle": bool(shells) and correct_returns and
+            len(cycles) == len(set(cycles)),
+        "Yards return fires real tier-scaled shell uniforms": bool(shells) and all(
+            row["room"] == "prospective" and row["bar"] % 16 == 10 and
+            (3 <= row["shells"] <= 6 if row["tier"] == 3 else 2 <= row["shells"] <= 4) and
+            sum(shell[3] > 0 for shell in row["drawn"]) == row["shells"] and
+            row["frameObserved"] == row["frame"] and
+            row["particleLimit"] == {3: 64, 2: 38, 1: 26}[row["tier"]]
+            for row in shells),
+        "every observed kick writes a rendered grid ripple": len(value["kicks"]) >= 32 and all(
+            row["ripples"] and any(ripple[3] > 0 for ripple in row["ripples"]) for row in value["kicks"]),
+        "kick ripples originate at active district center or existing stage": ripple_origins,
+        "grid shader uses 20 unit speed and 1.5 second decay":
+            bool(re.search(r"radius\s*=\s*age\s*\*\s*20(?:\.0)?", value["gridShader"])) and
+            "step(age,1.5)" in value["gridShader"].replace(" ", "") and
+            "1.0-age/1.5" in value["gridShader"].replace(" ", ""),
+        "lasers and searchlights animate real instance matrices":
+            value["beforeLaser"] != value["afterLaser"] and value["beforeSearch"] != value["afterSearch"] and
+            value["afterTime"] > value["beforeTime"],
+    }
+    path("world-rave-dynamics.json").write_text(json.dumps(value, indent=2), encoding="utf-8")
+    for name in ("beforeLaser", "afterLaser", "beforeSearch", "afterSearch", "gridShader"):
+        value.pop(name)
+    value["checks"] = checks
+    return value, checks
+
+
+def verify_rave_reduced(engine, path):
+    """Compare actual motion buffers across a reduced-motion silent transition."""
+    engine.evaluate("""() => {
+      const v=window.__vc,r=v.rave,q=window.__qaRaveReduced={buffers:[],frames:[],done:false};
+      for(const name of ['lasers','searchlights','drones','fireworks']){
+        const mesh=r[name],attr=mesh.instanceMatrix??mesh.geometry.attributes.position;
+        const a=attr.array;q.buffers.push({name,attr,bytes:new Uint8Array(a.buffer,a.byteOffset,a.byteLength).slice()});
+      }
+      let started=performance.now();
+      v.beat.setRoom('procedural');
+      function tick(){
+        const u=r.uniforms,c=u.uColor.value;
+        q.frames.push({time:performance.now()-started,cut:u.uCut.value,flash:u.uFlash.value,
+          motionTime:u.uTime.value,color:[c.r,c.g,c.b],stage:u.uStage.value});
+        if(performance.now()-started>=24000){q.done=true;return;}
+        requestAnimationFrame(tick);
+      }
+      requestAnimationFrame(tick);
+    }""")
+    wait_probe(engine, "() => window.__qaRaveReduced.done", 30)
+    value = engine.evaluate("""() => {const q=window.__qaRaveReduced;return {
+      frames:q.frames,buffers:q.buffers.map(e=>{
+        const a=e.attr.array,x=new Uint8Array(a.buffer,a.byteOffset,a.byteLength);
+        return {name:e.name,bytes:x.length,identical:x.length===e.bytes.length&&x.every((v,i)=>v===e.bytes[i])};
+      })};}""")
+    rows = value["frames"]
+    value["passed"] = (all(row["identical"] for row in value["buffers"]) and
+                       all(row["cut"] == 1 and row["flash"] == 0 for row in rows) and
+                       len({row["motionTime"] for row in rows}) == 1)
+    color_changes = [(after["time"], max(abs(a - b) for a, b in zip(after["color"], before["color"])))
+                     for before, after in zip(rows, rows[1:])]
+    value["maximumFrameColorDelta"] = max((delta for _, delta in color_changes), default=0)
+    active = [stamp for stamp, delta in color_changes if delta > 1e-7]
+    value["colorChangeDurationMs"] = active[-1] - active[0] if len(active) > 1 else 0
+    gaps = [after["time"] - before["time"] for before, after in zip(rows, rows[1:])]
+    value["maximumSampleGapMs"] = max(gaps, default=0)
+    value["colorPassed"] = bool(active) and (
+        value["colorChangeDurationMs"] + value["maximumSampleGapMs"] >= 4 * 60 / 140 * 1000)
+    path("world-reduced-motion.json").write_text(json.dumps(value, indent=2), encoding="utf-8")
+    value["frameCount"] = len(value.pop("frames"))
+    return value
+
+
 def inspect_compilation(engine):
     return engine.evaluate("""() => {
       const v=window.__vc,materials=new Set(),uncompiled=[];
@@ -475,16 +857,21 @@ def verify_governor(engine, url):
     engine.ready()
     return engine.evaluate("""() => {
       const t=window.__vc.tier,rows=[],initial=t.current,initialSettledMs=t.settledForMs;
+      function raveCounts(){const r=window.__vc.rave;if(!r)return null;r.update(0);
+        return {tier:t.current,lasers:r.lasers.count,drones:r.drones.geometry.drawRange.count,
+          searchlights:r.searchlights.count};}
+      const initialRave=raveCounts();
       function feed(count,ms){for(let i=0;i<count;i++){
         const before=t.current,settledBefore=t.settledForMs;t.update(ms);
         fastSpan=t.meanMs<12?fastSpan+ms:0;
         if(t.current!==before){rows.push({elapsed:elapsed+ms,before,after:t.current,
-          mean:t.meanMs,sincePreviousChangeMs:settledBefore+ms,fastSpanMs:fastSpan});fastSpan=0;}
+          mean:t.meanMs,sincePreviousChangeMs:settledBefore+ms,fastSpanMs:fastSpan,
+          rave:raveCounts()});fastSpan=0;}
         elapsed+=ms;}}
       let elapsed=0,fastSpan=0;feed(300,20);const slow=t.current;feed(150,20);const floor=t.current;
       const recoveryStart=elapsed;feed(999,10);const beforeTenSeconds=t.current;
       feed(350,10);const recovered=t.current;
-      return {initial,initialSettledMs,slow,floor,beforeTenSeconds,recovered,recoveryStart,changes:rows};
+      return {initial,initialSettledMs,slow,floor,beforeTenSeconds,recovered,recoveryStart,initialRave,changes:rows};
     }""")
 
 
@@ -575,6 +962,20 @@ def main():
                 checks["all existing modes and Lights settings flash gate"] = len(report["flash"]) == 9 and all(item["measuredTracePass"] for item in report["flash"])
                 report["foundations"], foundation_checks = measure_foundations(eng, path)
                 checks.update(foundation_checks)
+                if phase >= 1:
+                    report["raveInventory"], rave_checks = verify_rave_inventory(eng)
+                    checks.update(rave_checks)
+                    report["cityShader"] = verify_city_shader(eng)
+                    checks["cityMat light terms retain baseline uniform dependencies"] = report["cityShader"]["passed"]
+                    report["transitions"] = []
+                    report["transitions"].append(measure_transition(eng, path, True))
+                    checks["window light invariant sound on"] = report["transitions"][0]["buffersPass"]
+                    report["transitions"].append(measure_transition(eng, path, False))
+                    checks["four-step transition within one frame"] = all(
+                        row["timingPass"] and row["renderPass"] for row in report["transitions"])
+                    checks["window light invariant sound off"] = report["transitions"][1]["buffersPass"]
+                    report["raveDynamics"], dynamics_checks = measure_rave_dynamics(eng, path)
+                    checks.update(dynamics_checks)
                 report["lightPolicy"], policy_checks = verify_light_policy(eng)
                 checks.update(policy_checks)
                 report["governor"] = verify_governor(eng, args.url)
@@ -587,12 +988,23 @@ def main():
                     governor["beforeTenSeconds"] == 1 and governor["recovered"] >= 2 and
                     all(row["fastSpanMs"] >= 10000 for row in governor["changes"]
                         if row["after"] > row["before"]))
+                if phase >= 1:
+                    tier_rows = [governor["initialRave"]] + [row["rave"] for row in governor["changes"]]
+                    checks["rave instance counts apply all three governor tiers"] = (
+                        all(row is not None for row in tier_rows) and
+                        {row["tier"] for row in tier_rows} == {1, 2, 3} and
+                        all(row["lasers"] == {3: 14, 2: 10, 1: 6}[row["tier"]] and
+                            row["drones"] == {3: 256, 2: 128, 1: 0}[row["tier"]] for row in tier_rows))
                 report["reducedMotion"] = verify_reduced_motion(eng, args.url)
                 reduced = report["reducedMotion"]
                 checks["reduced motion forces Calm without flashes blackout or strobes"] = (
                     reduced["setting"] == "Calm" and reduced["selectDisabled"] and
                     not reduced["flash"] and reduced["cutFactor"] == 1 and not reduced["strobes"] and
                     reduced["colorDuration"] >= 4 * 60 / 140)
+                if phase >= 1:
+                    report["raveReduced"] = verify_rave_reduced(eng, path)
+                    checks["reduced rave geometry freezes without cut or flash"] = report["raveReduced"]["passed"]
+                    checks["reduced room color changes take at least one bar"] = report["raveReduced"]["colorPassed"]
                 report["phone"] = verify_phone(eng, args.url, path)
                 phone = report["phone"]
                 checks["375 px phone starts Tier 1 with pixel ratio 1"] = (
