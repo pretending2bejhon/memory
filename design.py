@@ -289,17 +289,24 @@ def place_venues(data, layout, buildings, routes, stages):
                 break
             if all(math.hypot(v["x"] - c["x"], v["y"] - c["y"]) > 0.8 for c in chosen):
                 chosen.append(v)
-        for v in chosen:
-            if district in SINGLE_VENUE:
-                kind = SINGLE_VENUE[district]
-            else:
-                weights = VENUE_WEIGHTS[district]
-                x, total, kind = rnd() * sum(weights), 0, "bar"
-                for name, weight in zip(VENUE_TYPES, weights):
-                    total += weight
-                    if x <= total and weight:
-                        kind = VENUE_OTHER.get(district, "bar") if name == "other" else name
-                        break
+        # C4.3 type weights as quotas: largest remainder over the chosen hosts, then a seeded shuffle,
+        # so even a small district matches its table (a random draw per venue missed it badly).
+        kinds = []
+        if district in SINGLE_VENUE:
+            kinds = [SINGLE_VENUE[district]] * len(chosen)
+        elif chosen:
+            weights = VENUE_WEIGHTS[district]
+            exact = [w * len(chosen) / sum(weights) for w in weights]
+            quota = [math.floor(x) for x in exact]
+            order = sorted(range(len(weights)), key=lambda i: (-(exact[i] - quota[i]), i))
+            for i in order[:len(chosen) - sum(quota)]:
+                quota[i] += 1
+            for name, count in zip(VENUE_TYPES, quota):
+                kinds += [VENUE_OTHER.get(district, "bar") if name == "other" else name] * count
+            for i in range(len(kinds) - 1, 0, -1):
+                j = int(rnd() * (i + 1))
+                kinds[i], kinds[j] = kinds[j], kinds[i]
+        for v, kind in zip(chosen, kinds):
             # A terrace only where the free strip in front of the face is 0.25 deep or more.
             terrace = 0.0
             if v["gap"] >= 0.25:

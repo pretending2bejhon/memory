@@ -27,42 +27,124 @@ function ribbon(route, width, offset, height, material) {
   const geo=new THREE.BufferGeometry(); geo.setAttribute('position',new THREE.Float32BufferAttribute(pos,3)); geo.setAttribute('uv',new THREE.Float32BufferAttribute(uv,2)); geo.setIndex(indices); geo.computeVertexNormals();
   const mesh=new THREE.Mesh(geo,material); streetGroup.add(mesh); return mesh;
 }
-const wetStreet = color => new THREE.ShaderMaterial({
+// C11.3: puddles carry coloured streaks from nearby signs. Each road keeps a strip texture along its
+// length with one row per kerb; a sign adds its colour to the bins beside it. The streaks are static:
+// they change only when the timeline switches a sign on or off, and the rave cut dims them with the signs.
+const GLOW_BIN=.1,glowSources=[],streetCut={value:1};
+const routeGlow=routes.map(route=>{
+  const bins=Math.max(8,Math.min(2048,Math.ceil(route.length/GLOW_BIN))),data=new Uint8Array(bins*2*4);
+  const texture=new THREE.DataTexture(data,bins,2,THREE.RGBAFormat);
+  texture.magFilter=texture.minFilter=THREE.LinearFilter;texture.wrapS=THREE.RepeatWrapping;texture.needsUpdate=true;
+  return {bins,data,texture,acc:new Float32Array(bins*2*3)};
+});
+let glowDirty=true;
+// Registers a sign at world point p with a linear colour; returns its id, or -1 when no road is near.
+function streetGlowSource(p,color,weight){
+  const taps=[];
+  routes.forEach((route,ri)=>{
+    const pts=route.points;let best=0,bd=Infinity;
+    for(let i=0;i<pts.length;i++){const dx=pts[i].x-p.x,dz=pts[i].z-p.z,d=dx*dx+dz*dz;if(d<bd){bd=d;best=i;}}
+    const a=pts[best],b=pts[(best+1)%pts.length],dx=b.x-a.x,dz=b.z-a.z,l=Math.hypot(dx,dz)||1;
+    const lateral=((p.x-a.x)*dz-(p.z-a.z)*dx)/l,along=((p.x-a.x)*dx+(p.z-a.z)*dz)/l,reach=Math.abs(lateral)-route.width/2;
+    if(reach>1.5)return;
+    const G=routeGlow[ri],s=route.lengths[best]+along,w=weight*(1-Math.max(0,reach-.3)/1.2),row=lateral>0?1:0;
+    for(let c=Math.floor((s-.4)/route.length*G.bins);c<=Math.ceil((s+.4)/route.length*G.bins);c++){
+      const k=w*Math.max(0,1-Math.abs((c+.5)/G.bins*route.length-s)/.4);
+      if(k>0)taps.push(ri,((c%G.bins)+G.bins)%G.bins,row,k);
+    }
+  });
+  if(!taps.length)return -1;
+  glowSources.push({taps,color,level:0});return glowSources.length-1;
+}
+function setStreetGlow(id,level){const s=glowSources[id];if(s&&s.level!==level){s.level=level;glowDirty=true;}}
+function commitStreetGlow(){
+  if(!glowDirty)return;glowDirty=false;
+  for(const G of routeGlow)G.acc.fill(0);
+  for(const s of glowSources){if(!s.level)continue;const t=s.taps;
+    for(let i=0;i<t.length;i+=4){const G=routeGlow[t[i]],o=(t[i+2]*G.bins+t[i+1])*3,k=t[i+3]*s.level;G.acc[o]+=s.color[0]*k;G.acc[o+1]+=s.color[1]*k;G.acc[o+2]+=s.color[2]*k;}}
+  // Stored at half scale, so two overlapping signs still fit a byte.
+  for(const G of routeGlow){for(let j=0,n=G.bins*2;j<n;j++){G.data[j*4]=Math.min(255,G.acc[j*3]*127.5);G.data[j*4+1]=Math.min(255,G.acc[j*3+1]*127.5);G.data[j*4+2]=Math.min(255,G.acc[j*3+2]*127.5);G.data[j*4+3]=255;}
+    G.texture.needsUpdate=true;}
+}
+const wetStreet = (color, route, glow) => new THREE.ShaderMaterial({
   side:THREE.DoubleSide,fog:true,
-  uniforms:THREE.UniformsUtils.merge([THREE.UniformsLib.fog,{uGlow:{value:col(color)}}]),
+  uniforms:Object.assign(THREE.UniformsUtils.merge([THREE.UniformsLib.fog,{uGlow:{value:col(color)},uLen:{value:route.length},uWidth:{value:route.width}}]),{uSigns:{value:glow.texture},uCut:streetCut}),
   vertexShader:`varying vec2 vUV;
     #include <fog_pars_vertex>
     void main(){vUV=uv;vec4 mvPosition=modelViewMatrix*vec4(position,1.0);gl_Position=projectionMatrix*mvPosition;
     #include <fog_vertex>
     }`,
-  fragmentShader:`varying vec2 vUV;uniform vec3 uGlow;
+  fragmentShader:`varying vec2 vUV;uniform vec3 uGlow;uniform sampler2D uSigns;uniform float uLen,uWidth,uCut;
     #include <fog_pars_fragment>
     float noise(vec2 p){return fract(sin(dot(p,vec2(12.9898,78.233)))*43758.5453);}
+    float smoothNoise(vec2 p){vec2 i=floor(p),f=fract(p);f=f*f*(3.0-2.0*f);return mix(mix(noise(i),noise(i+vec2(1.0,0.0)),f.x),mix(noise(i+vec2(0.0,1.0)),noise(i+1.0),f.x),f.y);}
     void main(){
       float grain=noise(floor(vUV*vec2(320.0,140.0)));
       float puddle=smoothstep(.2,.8,sin(vUV.y*3.1)*.5+.5);
       float streak=pow(abs(vUV.x-.5)*2.0,2.8)*puddle;
       vec3 c=vec3(.008,.015,.025)*( .8+.2*grain )+uGlow*streak*.11;
       c+=vec3(.026,.048,.057)*pow(max(0.0,1.0-abs(vUV.x-.43)*5.0),4.0)*puddle;
+      // Sign light pooled in the puddles: strongest at its own kerb, broken into thin streaks across the road.
+      float t=vUV.y/uLen,across=vUV.x*uWidth;
+      vec3 near=texture2D(uSigns,vec2(t,.25)).rgb*2.0*exp(-across*2.2)+texture2D(uSigns,vec2(t,.75)).rgb*2.0*exp(-(uWidth-across)*2.2);
+      float wet=smoothstep(.4,.62,smoothNoise(vec2(across,vUV.y)*2.3+7.1));
+      float lines=vUV.y*30.0,rip=mix(.6,.3+.7*smoothNoise(vec2(lines,vUV.x*2.0)),1.0-smoothstep(.3,.7,fwidth(lines)));
+      c+=near*(.25+.75*wet)*rip*.3*uCut;
       gl_FragColor=vec4(c,1.0);
       #include <fog_fragment>
       #include <colorspace_fragment>
     }`
 });
-const sidewalkMat = new THREE.MeshBasicMaterial({color:col(hex('#263544')),side:THREE.DoubleSide});
+// C11.3: sidewalks laid in square tiles (one material per road width), joints fading out with distance.
+const sidewalkMats=new Map();
+function sidewalkMat(width){
+  if(!sidewalkMats.has(width))sidewalkMats.set(width,new THREE.ShaderMaterial({side:THREE.DoubleSide,fog:true,
+    uniforms:THREE.UniformsUtils.merge([THREE.UniformsLib.fog,{uBase:{value:col(hex('#263544'))},uWidth:{value:width}}]),
+    vertexShader:`varying vec2 vUV;
+      #include <fog_pars_vertex>
+      void main(){vUV=uv;vec4 mvPosition=modelViewMatrix*vec4(position,1.0);gl_Position=projectionMatrix*mvPosition;
+      #include <fog_vertex>
+      }`,
+    fragmentShader:`varying vec2 vUV;uniform vec3 uBase;uniform float uWidth;
+      #include <fog_pars_fragment>
+      float tileHash(vec2 p){return fract(sin(dot(p,vec2(12.9898,78.233)))*43758.5453);}
+      void main(){
+        vec2 t=vec2((vUV.x-.5)*uWidth,vUV.y)/.065,fw=max(fwidth(t),vec2(1e-4)),g=abs(fract(t-.5)-.5)/fw;
+        float far=smoothstep(.25,.6,max(fw.x,fw.y));
+        float joint=(1.0-min(min(g.x,g.y),1.0))*(1.0-far);
+        float shade=mix(.92+.12*tileHash(floor(t)),.98,far);
+        gl_FragColor=vec4(uBase*shade*(1.0-.4*joint),1.0);
+        #include <fog_fragment>
+        #include <colorspace_fragment>
+      }`}));
+  return sidewalkMats.get(width);
+}
 const markingMat = new THREE.MeshBasicMaterial({color:col(hex('#b5b7a1')),side:THREE.DoubleSide,transparent:true,opacity:.38});
-const dashMatrices=[];
-for(const route of routes) {
-  ribbon(route,route.width+.26,0,-.012,sidewalkMat);
-  ribbon(route,route.width,0,.005,wetStreet(styleOf(route.district).light));
+const dashMatrices=[],arrowMatrices=[];
+for(const [ri,route] of routes.entries()) {
+  ribbon(route,route.width+.26,0,-.012,sidewalkMat(route.width+.26));
+  ribbon(route,route.width,0,.005,wetStreet(styleOf(route.district).light,route,routeGlow[ri]));
   for(const side of [-1,1]) ribbon(route,.018,side*(route.width/2+.025),.015,new THREE.MeshBasicMaterial({color:col(styleOf(route.district).light),transparent:true,opacity:.42,side:THREE.DoubleSide}));
   for(let d=0;d<route.length;d+=1.8) {
     const p=sampleRoute(route,d),q=sampleRoute(route,d+.35);
     dummy.rotation.set(-Math.PI/2,0,Math.atan2(q.x-p.x,q.z-p.z));dummy.position.copy(p);dummy.position.y+=.022;dummy.scale.set(1,1,1);dummy.updateMatrix();dashMatrices.push(dummy.matrix.clone());
   }
+  // C11.3: a lane arrow in each lane every 7.2 units, pointing the way that lane's traffic drives.
+  // Traffic keeps to the right (society.js), so the lane driving forward along the road is the negative offset.
+  const lane=route.district==='episodic'?.1:.14;
+  for(let d=3.6;d<route.length-.5;d+=7.2) for(const dir of [1,-1]) {
+    const p=sampleRoute(route,d,new THREE.Vector3(),-lane*dir),q=sampleRoute(route,d+.3*dir,new THREE.Vector3(),-lane*dir);
+    dummy.rotation.set(0,Math.atan2(q.x-p.x,q.z-p.z),0);dummy.position.copy(p);dummy.position.y+=.021;dummy.scale.set(1,1,1);dummy.updateMatrix();arrowMatrices.push(dummy.matrix.clone());
+  }
 }
 const dashes=new THREE.InstancedMesh(new THREE.PlaneGeometry(.025,.32),markingMat,dashMatrices.length);
 dashMatrices.forEach((m,i)=>dashes.setMatrixAt(i,m));streetGroup.add(dashes);
+const arrowGeometry=new THREE.BufferGeometry();
+{const L=.3,w=.02,hw=.06,hl=.11,y=L/2-hl;
+  arrowGeometry.setAttribute('position',new THREE.Float32BufferAttribute([-w,0,-L/2,w,0,-L/2,w,0,y, -w,0,-L/2,w,0,y,-w,0,y, -hw,0,y,hw,0,y,0,0,L/2],3));
+  arrowGeometry.computeVertexNormals();}
+const laneArrows=new THREE.InstancedMesh(arrowGeometry,markingMat,arrowMatrices.length);
+arrowMatrices.forEach((m,i)=>laneArrows.setMatrixAt(i,m));streetGroup.add(laneArrows);
 
 // Collision bounds include the overhanging canopy and roof equipment.
 const obstacles = nodes.map(n=>({n,minX:n.x-n.w*.57,maxX:n.x+n.w*.57,minZ:-n.y-n.d*.57,maxZ:-n.y+n.d*.57}));
@@ -136,7 +218,10 @@ for(const material of signMaterials.values()) {
   entries.forEach((entry,i)=>{const source=entry.mesh;source.scale.set(source.geometry.parameters.width,source.geometry.parameters.height,1);source.updateMatrix();entry.matrix=source.matrix.clone();entry.slot=i;entry.batch=mesh;mesh.setMatrixAt(i,entry.matrix);source.geometry.dispose();});
   mesh.frustumCulled=false;signGroup.add(mesh);signBatches.push(mesh);
 }
-function updateSigns(){signs.forEach(s=>s.batch.setMatrixAt(s.slot,s.n.state==='absent'?hidden:s.matrix));signBatches.forEach(m=>m.instanceMatrix.needsUpdate=true);}
+// Each projecting sign pools a little of its district colour in the puddles below it (a dark panel with lit text).
+const signPoint=new THREE.Vector3();
+signs.forEach(s=>{signPoint.setFromMatrixPosition(s.matrix);s.glow=streetGlowSource(signPoint,lin(styleOf(s.n.district).light),.35);});
+function updateSigns(){signs.forEach(s=>{s.batch.setMatrixAt(s.slot,s.n.state==='absent'?hidden:s.matrix);setStreetGlow(s.glow,s.n.state==='absent'?0:1);});signBatches.forEach(m=>m.instanceMatrix.needsUpdate=true);}
 
 // Distant silhouettes give the inhabited city a horizon and a sense of scale.
 const horizon=new THREE.Group();scene.add(horizon);const horizonRnd=mulberry(98);

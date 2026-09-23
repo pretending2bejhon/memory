@@ -1,7 +1,12 @@
 // Citizens: instanced body parts in outfits (C3). Walkers step on the beat, dancers fill the
 // stages, one DJ per stage. Every pose is a function of the beat clock; nothing here is a note.
 const peopleGroup=new THREE.Group();scene.add(peopleGroup);
-const CROWD_CAPS={3:{walkers:400,dancers:480},2:{walkers:240,dancers:288},1:{walkers:100,dancers:108}};
+// extras: the queues, seated patrons, vendors, bus stop waiters, terrace dancers and chiva riders society.js
+// adds (C3.7). Tier 1 keeps the phone budget of 220 people (C13.1): 100 walkers, 88 dancers, 12 DJs, 20 others.
+const CROWD_CAPS={3:{walkers:400,dancers:480,extras:88},2:{walkers:240,dancers:288,extras:53},1:{walkers:100,dancers:88,extras:20}};
+// Chiva riders ride with their chiva; society.js reserves their share of each extras cap from the chiva ranks.
+const riderReserve=typeof venueRiderReserve!=='undefined'?venueRiderReserve:{1:0,2:0,3:0};
+const extrasCap=level=>Math.max(0,CROWD_CAPS[level].extras-riderReserve[level]);
 
 // ------------------------------------------------------------------ outfits (C3.2, C3.3)
 const pickFrom=(rnd,list,weights)=>{
@@ -21,7 +26,7 @@ const ARCHETYPE_WEIGHTS={
   jhon:[5,0,35,5,15,0,5,5,30,0],prasma:[5,15,0,10,20,40,0,10,0,0],branding:[30,10,10,15,15,10,5,5,0,0],
   onebrain:[10,20,0,5,10,45,0,10,0,0],reef:[15,0,10,5,10,0,45,10,5,0],inbox:[5,5,5,0,15,5,5,10,0,50]};
 const NEON=['#ff3d9a','#39ff88','#29e6ff','#ffe03a','#ff8a1f','#b26bff'];
-function dress(district,rnd,archetype){
+function dress(district,rnd,archetype,job){
   if(archetype===undefined)archetype=pickFrom(rnd,[1,2,3,4,5,6,7,8,9,10],ARCHETYPE_WEIGHTS[district]||ARCHETYPE_WEIGHTS.working);
   const skin=pickFrom(rnd,SKIN,SKIN_WEIGHT),hair=rnd()<.08?pickFrom(rnd,DYED):pickFrom(rnd,HAIR,HAIR_WEIGHT);
   const o={archetype,skin,hair,top:'#8a9099',sleeve:null,bottom:'#2b2f36',leg:null,acc:{},hairStyle:rnd()<.55?'short':rnd()<.8?'long':'none'};
@@ -39,7 +44,7 @@ function dress(district,rnd,archetype){
     case 6:o.top=pickFrom(rnd,['#1c2228','#232a31','#2a2f24']);o.bottom=pickFrom(rnd,['#15191d','#1f2429']);if(rnd()<.8)acc.strips='#dfe8ec';if(rnd()<.25)acc.backpack='#101418';break;
     case 7:o.top=pickFrom(rnd,['#ff8a3d','#23c4b0','#a55bff','#ff5fa2','#ffd24a','#4ad1ff']);o.sleeve=rnd()<.5?skin:null;o.bottom=pickFrom(rnd,['#f2e8d5','#7b4b94','#2a6f97','#c2462b']);
       if(rnd()<.45)acc.crown=pickFrom(rnd,['#ff6fa8','#ffd24a','#8cf29a']);if(o.hairStyle==='short'&&rnd()<.5)o.hairStyle='long';break;
-    case 8:{const job=district==='prospective'&&rnd()<.6?'vis':pickFrom(rnd,['apron','bar','security']);
+    case 8:{if(!job)job=district==='prospective'&&rnd()<.6?'vis':pickFrom(rnd,['apron','bar','security']);
       if(job==='vis'){o.top='#d4f000';o.bottom='#1d2a44';acc.strips='#f4f4f4';}
       else if(job==='apron'){o.top=pickFrom(rnd,['#f1ece2','#d9d2c4']);o.bottom='#2f3440';acc.apron=pickFrom(rnd,['#f7f7f7','#7a4a2a']);}
       else {o.top='#0e0e10';o.bottom='#0e0e10';}break;}
@@ -79,10 +84,12 @@ const ACCESSORY_GEOMETRY={
   skirt:new THREE.CylinderGeometry(.05,.078,.09,10).translate(0,-.045,0),
   glow:box(.011,.065,.011,0,-.135,.012),
   suitcase:merge(box(.07,.095,.036,.115,.05,.01),box(.008,.06,.008,.115,.125,.01)),
+  // Held in the fist: the body at the hand, the neck further along the arm, so a raised arm lifts it upright.
+  bottle:merge(new THREE.CylinderGeometry(.009,.009,.045,6).translate(0,-.13,.014),new THREE.CylinderGeometry(.006,.004,.02,6).translate(0,-.1625,.014)),
 };
 // Where each accessory hangs: the joint whose motion it follows.
 const ACCESSORY_ATTACH={longHair:'head',cap:'head',bucket:'head',sombrero:'head',crown:'head',visor:'head',
-  backpack:'torso',chain:'torso',apron:'torso',strips:'torso',skirt:'hips',glow:'arms',suitcase:'root'};
+  backpack:'torso',chain:'torso',apron:'torso',strips:'torso',skirt:'hips',glow:'arms',suitcase:'root',bottle:'armA'};
 const EMISSIVE=new Set(['visor','glow','strips']);
 const personUniforms={uKey:{value:KEY},uKick:{value:0},uEnergy:{value:1},uCut:{value:1}};
 const personVertex=`attribute vec3 aTint;attribute float aLit;varying vec3 vColor,vN,vTint;varying float vLit;
@@ -126,13 +133,17 @@ const STYLE_BY_ROOM={core:'nod',episodic:'skank',semantic:'twostep',procedural:'
 const STYLE_ALTS={nod:['bounce','sway'],skank:['sway','bounce'],twostep:['sway','bounce'],stomp:['pump','bounce'],handsup:['pump','shuffle'],
   pump:['bounce','handsup'],baile:['bounce','sway'],tight:['twostep','robot'],robot:['glitch','bounce'],glitch:['robot','nod'],wave:['sway','nod'],sway:['nod','bounce']};
 const stageSlots=stages.map(()=>[]);
+// Food carts stand on the decks (society.js); nobody dances on a cart or its vendor.
+const deckCarts=(typeof furnitureItems!=='undefined'?furnitureItems:[]).filter(f=>f.kind==='cart'&&f.stage!==undefined)
+  .map(f=>({stage:f.stage,x:f.world.x,z:f.world.z,vx:f.world.x-Math.sin(f.yaw)*.14,vz:f.world.z-Math.cos(f.yaw)*.14}));
 for(const s of stages){
-  const slots=[],spacing=.17;
+  const slots=[],spacing=.17,carts=deckCarts.filter(c=>c.stage===s.index);
   for(let gx=-s.r;gx<=s.r;gx+=spacing)for(let gz=-s.r;gz<=s.r;gz+=spacing*.866){
     const ox=gx+(Math.round(gz/(spacing*.866))%2?spacing/2:0),x=s.center.x+ox,z=s.center.z+gz;
     if(Math.hypot(ox,gz)>s.r-.13)continue;
     const dx=x-s.booth.x,dz=z-s.booth.z;
     if(Math.hypot(dx,dz)<.5||dx*s.facing.x+dz*s.facing.z>-.2)continue;
+    if(carts.some(c=>Math.hypot(x-c.x,z-c.z)<.26||Math.hypot(x-c.vx,z-c.vz)<.2))continue;
     // Front rows fill first, but loosely, so a thin crowd still spreads over the floor.
     slots.push({x:x+(crowdRnd()-.5)*.05,z:z+(crowdRnd()-.5)*.05,d:Math.hypot(dx,dz)*.55+crowdRnd()*s.r*.75});
   }
@@ -148,7 +159,11 @@ const djs=stages.map(s=>{const p=s.booth.clone().addScaledVector(s.facing,.2);
   const person={kind:2,district:s.district,stage:s.index,x:p.x,y:s.z,z:p.z,yaw:s.yaw,offset:0,scale:1.02,energy:1,style:'dj',seed:crowdRnd(),outfit:dress(s.district,crowdRnd,2)};
   people.push(person);return person;});
 // V3 adds seated, vending, queueing and riding people through crowd.extras before this runs.
-const extraPeople=(typeof venueExtras!=='undefined'?venueExtras:[]).map(e=>{const person={kind:3,offset:0,energy:1,seed:crowdRnd(),scale:.92+crowdRnd()*.18,...e,outfit:dress(e.district,crowdRnd,e.archetype)};people.push(person);return person;});
+const extraPeople=(typeof venueExtras!=='undefined'?venueExtras:[]).map(e=>{const person={kind:3,offset:0,energy:1,seed:crowdRnd(),scale:.92+crowdRnd()*.18,...e,outfit:dress(e.district,crowdRnd,e.archetype,e.job)};
+  if(e.bottle)person.outfit.acc.bottle=pickFrom(crowdRnd,['#2f5a1e','#5a3514','#c7d7c9']);
+  // Terrace dancers take the room style like the stage crowd (C3.5): the room's own at 70 %, else an alternate.
+  if(person.pose==='dance'&&!person.style){const room=STYLE_BY_ROOM[person.district]||'bounce';person.style=crowdRnd()<.7?room:pickFrom(crowdRnd,STYLE_ALTS[room]);}
+  people.push(person);return person;});
 
 const PEOPLE=people.length;
 const personParts={},accessoryMeshes={};
@@ -247,12 +262,15 @@ beat.on('cut',()=>{freezeBeat=beat.now().totalBeats;});
 beat.on('drop',()=>{freezeBeat=-1;dropBeat=beat.now().totalBeats;});
 beat.on('hit',h=>{if(h.layer==='stab')stabUntil=beat.now().totalBeats+.5;});
 
-const crowdState={walkers:CROWD_CAPS[phone?1:3].walkers,dancerCap:CROWD_CAPS[phone?1:3].dancers,stageVisible:stages.map(()=>0),stageTarget:stages.map(()=>0),frame:0};
+const crowdState={walkers:CROWD_CAPS[phone?1:3].walkers,dancerCap:CROWD_CAPS[phone?1:3].dancers,extras:extrasCap(phone?1:3),stageVisible:stages.map(()=>0),stageTarget:stages.map(()=>0),frame:0};
 const shown=new Uint8Array(PEOPLE);
 const camWorld=new THREE.Vector3(),walkPoint=new THREE.Vector3(),walkAhead=new THREE.Vector3();
 function isVisible(i,p){
   if(p.kind===0)return i<crowdState.walkers;
   if(p.kind===1){const list=stageSlots[p.stage];return p.rank<crowdState.stageVisible[p.stage];}
+  // Kind 3: inside the tier cap (riders hold a reserved share), then either its own gate (riders follow
+  // their chiva, street people their district's stage) or the venue state.
+  if(p.kind===3)return (p.free===true||p.extraRank<crowdState.extras)&&(p.gate?p.gate():p.hidden!==true);
   return p.hidden!==true;
 }
 stageSlots.forEach(list=>list.forEach((index,rank)=>{people[index].rank=rank;}));
@@ -263,7 +281,7 @@ function setTimeline(stats){
   stages.forEach((s,i)=>{crowdState.stageVisible[i]=Math.min(stageSlots[i].length,Math.round(crowdState.stageTarget[i]*scale));});
 }
 let lastStats=null;
-function applyCrowdTier(level){const cap=CROWD_CAPS[level];crowdState.walkers=cap.walkers;crowdState.dancerCap=cap.dancers;if(lastStats)setTimeline(lastStats);}
+function applyCrowdTier(level){const cap=CROWD_CAPS[level];crowdState.walkers=cap.walkers;crowdState.dancerCap=cap.dancers;crowdState.extras=extrasCap(level);if(lastStats)setTimeline(lastStats);}
 
 function updatePeople(dt,now){
   if(!peopleGroup.visible)return;
@@ -297,17 +315,20 @@ function updatePeople(dt,now){
     const t=b.totalBeats+p.offset;
     if(!live){stillPose(p.kind===3?p.pose:'stand',0,pose);if(p.kind===0)walkPose(0,false,pose);}
     else if(p.kind===0)walkPose(t,p.relaxed,pose);
-    else if(p.kind===3)stillPose(p.pose,t,pose);
+    else if(p.kind===3&&p.pose!=='ride'&&p.pose!=='dance'){stillPose(p.pose,t,pose);
+      // Seated patrons raise the bottle for one bar on the drop.
+      if(p.pose==='sit'){const since=b.totalBeats-dropBeat;if(since>=0&&since<4){pose.aA=-2.75;pose.bA=.12;pose.nod=-.15;}}}
     else{
       let e=p.energy,tt=t;
       if(stage==='bridge')e*=.5;
       if(stage==='cut'&&freezeBeat>=0)tt=freezeBeat+p.offset;
       stylePose(p.style,tt,e,p.seed,pose);
       if(stage==='bridge')pose.nod-=.32;
-      if(stage==='riser'&&p.kind===1){const ph=((tt%1)+1)%1,close=.45*(.5+.5*Math.cos(Math.PI*2*ph));pose.aA=-2.85;pose.aB=-2.85;pose.bA=close;pose.bB=-close;pose.nod=-.25;}
+      const crowdMember=p.kind===1||p.kind===3;
+      if(stage==='riser'&&crowdMember){const ph=((tt%1)+1)%1,close=.45*(.5+.5*Math.cos(Math.PI*2*ph));pose.aA=-2.85;pose.aB=-2.85;pose.bA=close;pose.bB=-close;pose.nod=-.25;}
       const since=b.totalBeats-dropBeat;
       if(since>=0&&since<4){if(since<1)pose.jump=.08*Math.sin(Math.PI*since);
-        if(p.kind===1){pose.aA=-2.8;pose.bA=-.3;pose.aB=-2.8;pose.bB=.3;}else pose.aB=-2.9;}
+        if(crowdMember){pose.aA=-2.8;pose.bA=-.3;pose.aB=-2.8;pose.bB=.3;}else pose.aB=-2.9;}
       if(p.style==='handsup'&&b.totalBeats<stabUntil)pose.jump=Math.max(pose.jump,.03);
     }
     const s=p.scale,cy=Math.cos(yaw),sy=Math.sin(yaw),cu=Math.cos(yaw+pose.twist),su=Math.sin(yaw+pose.twist);
@@ -326,6 +347,7 @@ function updatePeople(dt,now){
       if(at==='head')writePart(arr,a.slot,px,body,pz,cu,su,s,0,J.neckY,0,pose.nod,0,1,1,1);
       else if(at==='torso')writePart(arr,a.slot,px,body,pz,cu,su,s,0,J.torsoY,0,pose.lean,0,1,1,1);
       else if(at==='hips')writePart(arr,a.slot,px,body,pz,cy,sy,s,0,J.hipY+.03,0,0,0,1,1,1);
+      else if(at==='armA')writePart(arr,a.slot,px,body,pz,cu,su,s,J.shoulderX,J.shoulderY,0,pose.aA,pose.bA,1,1,1);
       else if(at==='arms'){writePart(arr,a.slot*2,px,body,pz,cu,su,s,J.shoulderX,J.shoulderY,0,pose.aA,pose.bA,1,1,1);writePart(arr,a.slot*2+1,px,body,pz,cu,su,s,-J.shoulderX,J.shoulderY,0,pose.aB,pose.bB,1,1,1);}
       else writePart(arr,a.slot,px,py,pz,cy,sy,s,0,0,0,0,0,1,1,1);
     }
@@ -340,6 +362,6 @@ function census(){
   people.forEach((p,i)=>{if(!isVisible(i,p))return;if(p.kind===0)walkers++;else if(p.kind===1)dancers++;else if(p.kind===2)djCount++;else others++;});
   return {walkers,dancers,djs:djCount,others,perStage:stages.map((s,i)=>({district:s.district,visible:crowdState.stageVisible[i],capacity:s.capacity,target:crowdState.stageTarget[i]}))};
 }
-const crowd={people,parts:personParts,accessories:accessoryMeshes,stages,stageSlots,djs,state:crowdState,census,
+const crowd={people,parts:personParts,accessories:accessoryMeshes,stages,stageSlots,djs,extras:extraPeople,caps:CROWD_CAPS,riderReserve,state:crowdState,census,
   setTimeline(stats){lastStats=stats;setTimeline(stats);},applyTier:applyCrowdTier,isVisible,
   get count(){return census();}};

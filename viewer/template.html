@@ -88,6 +88,9 @@
   .chipst.dark, .chipst.foundation, .chipst.absent { color: var(--dim2); }
   .card p { margin: 0; font: 12px/1.5 var(--sans); color: var(--dim); }
   .card .actions { display: flex; gap: 8px; }
+  .card .venue { display: flex; flex-direction: column; gap: 3px; padding-bottom: 9px; border-bottom: 1px solid var(--line); }
+  .card .venue b { font: 600 16px/1.05 'Rajdhani', var(--sans); letter-spacing: .07em; text-transform: uppercase; color: var(--c, var(--text)); text-shadow: 0 0 12px var(--c, transparent); }
+  .card .venue span { font-size: 10px; letter-spacing: .14em; text-transform: uppercase; color: var(--dim2); }
 
   .ride { position: fixed; left: 50%; top: calc(16px + env(safe-area-inset-top, 0px)); transform: translateX(-50%); padding: 7px 12px;
           font-size: 10px; letter-spacing: .18em; text-transform: uppercase; color: var(--hi); }
@@ -183,6 +186,7 @@
 <div class="ride glass" id="ride-badge" hidden><b id="ride-route">Lantern avenue</b><span>Riding along · Esc to return</span></div>
 
 <aside class="card glass" id="inspector" hidden aria-label="Selected building">
+  <div class="venue" id="i-venue" hidden><b id="i-venue-name"></b><span id="i-venue-meta"></span></div>
   <header><h2 id="i-title">building<small id="i-where"></small></h2><span class="chipst" id="i-state">lit</span></header>
   <p id="i-note"></p>
   <div class="actions"><button class="btn" id="i-focus" type="button">Focus</button><button class="btn" id="i-close" type="button">Close</button></div>
@@ -491,19 +495,20 @@ for (const [d, p] of Object.entries(DATA.plateaus)) {
 // one material for every instanced thing
 const cityMat = new THREE.ShaderMaterial({
   fog: true,
-  uniforms: THREE.UniformsUtils.merge([THREE.UniformsLib.fog, { uKey: { value: KEY }, uHover: { value: -1 }, uSelected: { value: -1 }, uTime: { value: 0 }, uEmit: { value: .8 }, uTail: { value: col(RED) } }]),
+  uniforms: THREE.UniformsUtils.merge([THREE.UniformsLib.fog, { uKey: { value: KEY }, uHover: { value: -1 }, uSelected: { value: -1 }, uTime: { value: 0 }, uEmit: { value: .8 }, uTail: { value: col(RED) }, uDressTime: { value: 0 }, uTags: { value: null } }]),
   vertexShader: `
-    attribute vec3 aBody; attribute vec3 aLight; attribute float aLit; attribute float aDim; attribute float aIndex; attribute float aSeed; attribute vec4 aWin; attribute float aPart;
+    attribute vec3 aBody; attribute vec3 aLight; attribute float aLit; attribute float aDim; attribute float aIndex; attribute float aSeed; attribute vec4 aWin; attribute float aPart; attribute vec2 aDress;
     varying vec3 vBody; varying vec3 vLight; varying float vLit; varying float vDim; varying float vIndex; varying float vSeed; varying vec4 vWin; varying float vPart;
-    varying vec3 vN; varying vec3 vNl; varying float vH; varying float vSY; varying vec2 vLocal; varying vec3 vWorld;
+    varying vec3 vN; varying vec3 vNl; varying float vH; varying float vSY; varying vec2 vLocal; varying vec3 vWorld; varying vec2 vDress; varying vec2 vObj; varying vec2 vSize;
     #include <fog_pars_vertex>
     void main(){
-      vBody = aBody; vLight = aLight; vLit = aLit; vDim = aDim; vIndex = aIndex; vSeed = aSeed; vWin = aWin; vPart = aPart;
+      vBody = aBody; vLight = aLight; vLit = aLit; vDim = aDim; vIndex = aIndex; vSeed = aSeed; vWin = aWin; vPart = aPart; vDress = aDress;
       float sx = length(vec3(instanceMatrix[0][0], instanceMatrix[0][1], instanceMatrix[0][2]));
       float sz = length(vec3(instanceMatrix[2][0], instanceMatrix[2][1], instanceMatrix[2][2]));
       vSY = length(vec3(instanceMatrix[1][0], instanceMatrix[1][1], instanceMatrix[1][2]));
       vH = position.y * vSY;
       vLocal = vec2(position.x * sx, position.z * sz);
+      vObj = position.xz; vSize = vec2(sx, sz);
       vNl = normal;
       vWorld = (modelMatrix * instanceMatrix * vec4(position,1.0)).xyz;
       vN = normalize(mat3(modelMatrix) * mat3(instanceMatrix) * normal);
@@ -512,11 +517,186 @@ const cityMat = new THREE.ShaderMaterial({
       #include <fog_vertex>
     }`,
   fragmentShader: `
-    uniform vec3 uKey; uniform float uHover; uniform float uSelected; uniform float uTime; uniform float uEmit; uniform vec3 uTail;
+    uniform vec3 uKey; uniform float uHover; uniform float uSelected; uniform float uTime; uniform float uEmit; uniform vec3 uTail; uniform float uDressTime; uniform sampler2D uTags;
     varying vec3 vBody; varying vec3 vLight; varying float vLit; varying float vDim; varying float vIndex; varying float vSeed; varying vec4 vWin; varying float vPart;
-    varying vec3 vN; varying vec3 vNl; varying float vH; varying float vSY; varying vec2 vLocal; varying vec3 vWorld;
+    varying vec3 vN; varying vec3 vNl; varying float vH; varying float vSY; varying vec2 vLocal; varying vec3 vWorld; varying vec2 vDress; varying vec2 vObj; varying vec2 vSize;
     #include <fog_pars_fragment>
     float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+    // C11: static material families (C11.1) and decay dressing (C11.2). They change only the base colour,
+    // before the light mix, and never read or write a window or edge light term (B2). A hue shift keeps
+    // the luminance; every luminance change is clamped to 15 percent either way.
+    float drHash(vec2 q){ return fract(sin(dot(q, vec2(41.37, 289.13))) * 43758.5453); }
+    float drNoise(vec2 q){ vec2 qi = floor(q); vec2 qf = fract(q); vec2 qs = qf * qf * (3.0 - 2.0 * qf);
+      return mix(mix(drHash(qi), drHash(qi + vec2(1.0, 0.0)), qs.x), mix(drHash(qi + vec2(0.0, 1.0)), drHash(qi + vec2(1.0, 1.0)), qs.x), qs.y); }
+    float drLine(float q, float k){ float fw = max(fwidth(q), 1e-4); float dd = abs(fract(q - 0.5) - 0.5);
+      return mix(1.0 - smoothstep(k * 0.5 - fw * 0.5, k * 0.5 + fw * 0.5, dd), k, smoothstep(0.3, 0.7, fw)); }
+    float drBand(float q, float a, float b){ float fw = max(fwidth(q), 1e-4); return smoothstep(a - fw, a + fw, q) * (1.0 - smoothstep(b - fw, b + fw, q)); }
+    float drLum(vec3 q){ return dot(q, vec3(0.2126, 0.7152, 0.0722)); }
+    vec3 drTint(vec3 q, vec3 t, float k){ return mix(q, t * (drLum(q) / max(drLum(t), 1e-4)), clamp(k, 0.0, 1.0)); }
+    vec3 drDress(vec3 base, float fu){
+      float fam = floor(vDress.x + 0.5);
+      float roof = step(1.5, vPart) * step(vPart, 2.5), wall = 1.0 - roof;
+      vec2 fp = mix(vec2(fu, vH), vLocal, step(0.9, abs(vNl.y)));
+      float px = fwidth(fp.x) + fwidth(fp.y);
+      float detail = 1.0 - smoothstep(0.01, 0.04, px), near = 1.0 - smoothstep(0.02, 0.05, px);
+      float gy = (vH - 0.28) / vWin.x, gx = fu * vWin.z;
+      float gRow = floor(gy), gRowF = fract(gy), gCol = floor(gx), gColF = fract(gx);
+      float winZone = step(0.28, vH) * step(vH, vSY - 0.2) * (1.0 - step(0.5, vPart));
+      float inCell = winZone * step(gRowF, vWin.y) * step(gColF, vWin.w);
+      vec3 q = base; float lf = 1.0;
+      if (fam < 1.5) {
+        // Compass: white stone in staggered courses.
+        q = drTint(q, vec3(1.0, 0.96, 0.9), 0.3);
+        float course = drLine(fp.y / 0.16, 0.07), joint = drLine(fp.x / 0.32 + 0.5 * step(0.5, fract(fp.y / 0.32)), 0.035);
+        lf *= (1.0 - 0.1 * max(course, joint * (1.0 - course)) * wall) * (0.96 + 0.08 * drNoise(fp * 3.0 + vSeed * 17.0));
+      } else if (fam < 2.5) {
+        // Archive: brick, painted shutters beside the windows, roll-down shutters over the shop glass.
+        float by = fp.y / 0.05, bx = fp.x / 0.11 + 0.5 * step(0.5, fract(by * 0.5));
+        float mortar = max(drLine(by, 0.18), drLine(bx, 0.09)) * wall;
+        q = drTint(q, vec3(0.62, 0.3, 0.2), 0.36 * wall);
+        q = drTint(q, vec3(0.8, 0.78, 0.72), 0.45 * mortar);
+        lf *= mix(1.0 + (drHash(vec2(floor(bx), floor(by)) + vSeed) - 0.6) * 0.1 * detail, 1.1, mortar);
+        float band = winZone * step(gRowF, vWin.y);
+        float shutter = band * (drBand(gColF, vWin.w + 0.02, vWin.w + 0.24) * step(drHash(vec2(gRow, gCol) + vSeed * 7.0), 0.55)
+          + drBand(gColF, 0.76, 0.98) * step(drHash(vec2(gRow, gCol + 1.0) + vSeed * 7.0), 0.55));
+        q = drTint(q, mix(vec3(0.2, 0.48, 0.38), vec3(0.26, 0.38, 0.62), step(0.5, drHash(vec2(vSeed, 2.0)))), 0.6 * shutter);
+        lf *= 1.0 - 0.1 * shutter * drLine(vH / 0.02, 0.35);
+        float shopGlass = step(2.5, vPart) * step(vPart, 3.5);
+        q = drTint(q, vec3(0.7, 0.72, 0.76), 0.35 * shopGlass);
+        lf *= 1.0 - 0.12 * shopGlass * drLine(vH / 0.018, 0.3);
+      } else if (fam < 3.5) {
+        // Library: pale stone, arch mouldings around the window cells.
+        q = drTint(q, vec3(0.9, 0.87, 0.8), 0.35);
+        lf *= 1.03 + 0.04 * drNoise(fp * 4.0 + vSeed * 3.0);
+        float ax = (fract(gx - vWin.w * 0.5 + 0.5) - 0.5) / vWin.z, ay = (gRowF - vWin.y) * vWin.x, r0 = vWin.w * 0.5 / vWin.z;
+        float rr = mix(abs(ax), length(vec2(ax, ay)), step(0.0, ay));
+        float mould = drBand(rr, r0 + 0.006, r0 + 0.034) * step(-vWin.y * vWin.x - 0.01, ay) * step(ay, r0 + 0.05) * winZone;
+        float tymp = step(0.0, ay) * (1.0 - smoothstep(r0 - 0.01, r0, rr)) * winZone;
+        lf *= (1.0 + 0.1 * mould) * (1.0 - 0.07 * tymp);
+      } else if (fam < 4.5) {
+        // Works: corrugated metal with rust streaks running down from the roof line.
+        q = drTint(q, vec3(0.62, 0.66, 0.7), 0.25);
+        float rib = fp.x / 0.04;
+        lf *= 1.0 + 0.07 * sin(rib * 6.2831853) * (1.0 - smoothstep(0.3, 0.7, fwidth(rib)));
+        float rust = smoothstep(0.55, 0.85, drNoise(vec2(fp.x * 9.0 + vSeed * 31.0, fp.y * 0.9))) * (0.4 + 0.6 * smoothstep(0.0, max(vSY, 0.3), vH));
+        q = drTint(q, vec3(0.6, 0.28, 0.12), 0.55 * rust);
+        lf *= 1.0 - 0.07 * rust;
+      } else if (fam < 5.5) {
+        // Yards: formwork concrete, safety mesh on the scaffolds, tarps.
+        float scaf = step(6.5, vPart);
+        q = drTint(q, vec3(0.72, 0.7, 0.64), 0.25 * (1.0 - scaf));
+        lf *= 1.0 - 0.08 * drLine(fp.y / 0.3, 0.05) * (1.0 - scaf);
+        float mesh = max(drLine((fp.x + fp.y) / 0.05, 0.14), drLine((fp.x - fp.y) / 0.05, 0.14));
+        float th = drHash(floor(vec2(fp.x / 0.45, fp.y / 0.9)) + vSeed * 5.0);
+        float tarp = step(th, 0.55) * max(scaf, step(0.28 + vWin.x, vH) * step(0.7, vSeed) * wall);
+        vec3 tcol = th < 0.18 ? vec3(0.15, 0.35, 0.8) : th < 0.36 ? vec3(0.9, 0.45, 0.1) : vec3(0.2, 0.55, 0.3);
+        q = drTint(q, tcol, 0.5 * tarp);
+        float fold = sin(fp.x * 40.0 + sin(fp.y * 6.0) * 2.0) * (1.0 - smoothstep(0.3, 0.7, fwidth(fp.x * 6.4)));
+        lf *= mix(1.0 - 0.1 * mesh * scaf, 1.0 + 0.06 * fold, tarp);
+      } else if (fam < 6.5) {
+        // Downtown: glass curtain with mullions, thin steady LED strips on the corners in the district colour.
+        q = drTint(q, vec3(0.45, 0.55, 0.8), 0.3);
+        float mull = max(drLine(fp.x / 0.12, 0.07), drLine((vH - 0.28) / vWin.x, 0.06) * wall);
+        lf *= (1.0 - 0.1 * mull) * (0.95 + 0.09 * smoothstep(0.0, max(vSY, 0.5), vH));
+        float nd = abs(vNl.x) > abs(vNl.z) ? (abs(vObj.x) - abs(vObj.y)) * vSize.y : (abs(vObj.y) - abs(vObj.x)) * vSize.x;
+        float strip = (1.0 - smoothstep(0.01, 0.01 + max(fwidth(nd), 1e-4), nd)) * step(0.01, vLit) * wall * step(0.99, max(abs(vNl.x), abs(vNl.z)));
+        q = drTint(q, vec3(0.456, 0.262, 0.955), 0.75 * strip);
+        lf *= 1.0 + 0.15 * strip;
+      } else if (fam < 7.5) {
+        // Hills: warm stucco, terracotta tile roofs, balconies under some windows.
+        q = drTint(q, mix(vec3(0.95, 0.78, 0.6), vec3(0.72, 0.3, 0.16), roof), 0.38 + 0.22 * roof);
+        lf *= 0.95 + 0.1 * drNoise(fp * 9.0 + vSeed * 11.0) * wall;
+        float tiles = drLine(fp.y / 0.035, 0.18) * roof;
+        float barrel = sin(fp.x * 139.6) * (1.0 - smoothstep(0.3, 0.7, fwidth(fp.x * 22.2))) * roof;
+        lf *= (1.0 - 0.12 * tiles) * (1.0 + 0.06 * barrel);
+        float balc = winZone * drBand(gRowF, 0.9, 1.0) * step(gColF, vWin.w + 0.1) * step(drHash(vec2(gRow + 1.0, gCol) + vSeed * 3.0), 0.45) * step(vH, vSY - 0.2 - vWin.x * 0.5);
+        q = drTint(q, vec3(0.3, 0.3, 0.33), 0.35 * balc);
+        lf *= 1.0 - 0.12 * balc * (0.5 + 0.5 * drLine(fp.x / 0.02, 0.3));
+      } else if (fam < 8.5) {
+        // Prasma Campus: frosted hex panels.
+        vec2 hp = fp / 0.14, hs = vec2(1.0, 1.7320508);
+        vec2 ha = mod(hp, hs) - hs * 0.5, hb = mod(hp - hs * 0.5, hs) - hs * 0.5;
+        vec2 hg = dot(ha, ha) < dot(hb, hb) ? ha : hb;
+        float hd = max(dot(abs(hg), vec2(0.5, 0.8660254)), abs(hg.x));
+        float seam = smoothstep(0.44, 0.49, hd) * (1.0 - smoothstep(0.25, 0.6, fwidth(hp.x) + fwidth(hp.y)));
+        q = drTint(q, vec3(0.78, 0.92, 1.0), 0.32);
+        lf *= mix(1.03 + 0.06 * drHash(floor((hp - hg) * 2.0 + 0.5)) * detail, 0.88, seam);
+      } else if (fam < 9.5) {
+        // Signal Row: painted murals and neon tubes.
+        float m1 = drNoise(fp * 1.6 + vSeed * 9.0), m2 = drNoise(fp * 3.1 - 3.0);
+        q = drTint(q, 0.65 + 0.5 * cos(6.2831853 * (vec3(0.0, 0.33, 0.67) + m1 * 1.3 + vSeed)), 0.5 * wall);
+        lf *= 0.93 + 0.13 * m2;
+        float tube = max(drLine((fp.y - 0.35 * sin(fp.x * 3.0 + vSeed * 6.0)) / 0.7, 0.04), drLine((fp.x + 0.2 * sin(fp.y * 4.0 + vSeed)) / 0.9, 0.03)) * wall;
+        q = drTint(q, mix(vec3(1.0, 0.3, 0.9), vec3(0.3, 0.9, 1.0), step(0.5, vSeed)), 0.85 * tube);
+        lf *= 1.0 + 0.15 * tube;
+      } else if (fam < 10.5) {
+        // Dome: geodesic panels, sixteen around.
+        float az = atan(vObj.y, vObj.x + 1e-5) * 2.5464791, el = vH / max(vSY, 0.01) * 6.0;
+        float geo = max(drLine(az, 0.06), max(drLine(az * 0.5 + el, 0.06), drLine(az * 0.5 - el, 0.06)));
+        q = drTint(q, vec3(0.75, 0.85, 1.0), 0.25);
+        lf *= (1.0 - 0.12 * geo) * (0.97 + 0.06 * drHash(floor(vec2(az, az * 0.5 + el))) * detail);
+      } else if (fam < 11.5) {
+        // Reef: organic coral skin; bioluminescent veins drift on their own slow clock.
+        vec2 pr = vec2(vObj.x * vSize.x + vH * 0.7, vObj.y * vSize.y - vH * 0.5) * 3.0;
+        float coral = drNoise(pr + drNoise(pr * 0.5) * 1.7);
+        q = drTint(q, vec3(0.95, 0.5, 0.45), 0.4 + 0.2 * coral);
+        lf *= 0.94 + 0.08 * coral;
+        float ridge = 1.0 - abs(drNoise(pr * 0.8 + 4.0) * 2.0 - 1.0);
+        float vein = smoothstep(0.86, 0.96, ridge) * (1.0 - smoothstep(0.08, 0.25, fwidth(ridge)));
+        float flow = 0.5 + 0.5 * sin(uDressTime * 0.5 - (pr.x + pr.y) * 0.8);
+        q = drTint(q, vec3(0.25, 1.0, 0.85), vein * (0.55 + 0.45 * flow));
+        lf *= 1.0 + 0.14 * vein * flow;
+      } else {
+        // Gate: carved stone with a key frieze.
+        q = drTint(q, vec3(0.82, 0.76, 0.66), 0.32);
+        float bandY = fract(fp.y / 0.3);
+        float frieze = drBand(bandY, 0.0, 0.22) * wall;
+        float key = step(0.5, fract(fp.x / 0.06 + step(0.5, fract(bandY / 0.11)) * 0.5));
+        lf *= (1.0 + 0.07 * frieze * (key * 2.0 - 1.0) * detail) * (1.0 - 0.1 * drLine(bandY / 0.22, 0.1) * wall) * (0.95 + 0.08 * drNoise(fp * 5.0 + vSeed));
+      }
+      // C11.2, read from the light state the building already shows. Faint (0.15 to 0.5): dust, and a
+      // for-rent panel on the ground floor unless it hosts a venue. Dark: boarded lower windows, graffiti.
+      float drOn = step(0.01, vLit), faint = drOn * (1.0 - step(0.5, vLit)), gone = 1.0 - drOn;
+      float dust = faint * (0.3 + 0.4 * drNoise(fp * 7.0 + vSeed * 5.0)) * (1.0 - 0.5 * smoothstep(0.0, max(vSY, 0.5), vH));
+      q = drTint(q, vec3(0.62, 0.58, 0.52), dust);
+      lf *= 1.0 - 0.1 * dust;
+      float face = abs(vNl.x) > abs(vNl.z) ? (vNl.x > 0.0 ? 0.0 : 1.0) : (vNl.z > 0.0 ? 2.0 : 3.0);
+      float front = (1.0 - step(0.5, vPart)) + step(2.5, vPart) * step(vPart, 3.5);
+      // The ground floor starts above the pavement plinth, which scales with the building.
+      float g0 = 0.05 * vSY;
+      vec2 pq = vec2(fu - (drHash(vec2(vSeed, 3.3)) - 0.5) * 0.14, vH - max(0.15, g0 + 0.1)) * 0.75;
+      float panel = faint * (1.0 - step(0.5, vDress.y)) * front * step(abs(face - floor(vSeed * 3.999)), 0.5) * drBand(pq.x, -0.075, 0.075) * drBand(pq.y, -0.05, 0.05) * near;
+      float ink = max(max(drBand(pq.y, 0.008, 0.03), drBand(pq.y, -0.03, -0.01)) * step(0.35, fract(pq.x / 0.016)) * step(abs(pq.x), 0.058),
+        1.0 - step(abs(pq.x), 0.064) * step(abs(pq.y), 0.04));
+      q = drTint(q, vec3(1.0, 0.95, 0.8), 0.7 * panel);
+      q = drTint(q, vec3(0.95, 0.25, 0.12), 0.8 * ink * panel);
+      lf = mix(lf, mix(1.15, 0.9, ink), panel);
+      float firstRow = max(0.0, ceil((g0 - 0.28) / vWin.x)), low = step(firstRow - 0.5, gRow) * step(gRow, firstRow + 1.5);
+      float boardWin = gone * inCell * low, boardGlass = gone * step(2.5, vPart) * step(vPart, 3.5) * step(vH, 0.3 * vSY);
+      float boards = max(boardWin, boardGlass);
+      float cellX = gColF / max(vWin.w, 0.01), cellY = gRowF / max(vWin.y, 0.01);
+      float seams = max(drLine(cellY * 4.0, 0.12) * boardWin, drLine(fu / 0.06, 0.1) * boardGlass);
+      float brace = (1.0 - smoothstep(0.05, 0.09, abs(cellX - cellY))) * boardWin;
+      q = drTint(q, vec3(0.62, 0.47, 0.3), 0.6 * boards);
+      lf *= mix(1.0, 1.1 - 0.18 * seams + 0.04 * brace, boards);
+      float tag = gone * smoothstep(0.6, 0.68, drNoise(vec2(fu * 5.0, vH * 7.0) + vSeed * 23.0)) * step(g0 * 0.7, vH) * (1.0 - smoothstep(g0 + 0.3, g0 + 0.45, vH)) * wall * (1.0 - boards) * near;
+      q = drTint(q, 0.5 + 0.5 * cos(6.2831853 * (vec3(0.0, 0.33, 0.67) + drHash(vec2(floor(fu * 2.0), vSeed)))), 0.8 * tag);
+      float squig = gone * drLine((vH - g0 - 0.14 - 0.04 * sin(fu * 25.0 + vSeed * 9.0)) / 0.5, 0.04) * step(0.45, drHash(vec2(floor(fu * 3.0), vSeed + 1.0))) * wall * step(vH, g0 + 0.3) * near;
+      q = drTint(q, vec3(0.95, 0.95, 1.0), 0.5 * squig);
+      lf *= (1.0 + 0.12 * tag) * (1.0 + 0.13 * squig);
+      // Curated words from the graffiti atlas (C11.4, the six words the shutters use, set by society.js),
+      // sprayed across one seeded face of a dark building above the pavement plinth, over the boards too.
+      // Base colour only.
+      vec2 dwUV = vec2((fu - (drHash(vec2(vSeed, 7.1)) - 0.5) * 0.3) / 0.34 + 0.5, (vH - g0 - 0.08) / 0.12);
+      float dwIn = step(0.0, dwUV.x) * step(dwUV.x, 1.0) * step(0.0, dwUV.y) * step(dwUV.y, 1.0);
+      float dwCell = floor(drHash(vec2(vSeed, 9.7)) * 5.999);
+      vec2 dwTile = vec2(mod(dwCell, 2.0), floor(dwCell / 2.0)), dwAt = clamp(dwUV, 0.0, 1.0);
+      float dwWord = gone * wall * dwIn * near * step(abs(face - floor(fract(vSeed * 7.0) * 3.999)), 0.5);
+      if (dwWord > 0.0) dwWord *= texture2D(uTags, vec2((dwTile.x + dwAt.x) / 2.0, 1.0 - (dwTile.y + 1.0 - dwAt.y) / 3.0)).r;
+      q = drTint(q, 0.5 + 0.5 * cos(6.2831853 * (vec3(0.0, 0.33, 0.67) + vSeed * 5.0)), 0.85 * dwWord);
+      lf *= 1.0 + 0.14 * dwWord;
+      return q * clamp(lf, 0.85, 1.15);
+    }
     void main(){
       vec3 n = normalize(vN);
       float d = max(dot(n, uKey), 0.0);
@@ -554,6 +734,7 @@ const cityMat = new THREE.ShaderMaterial({
       else if (vPart < 5.5) { mask = 1.0; light = vLight * 1.55; }
       else if (vPart < 6.5) { mask = 1.0; light = uTail * 1.3; }
       else if (vPart < 7.5) { float lines = max(step(fract(vH / 0.5), 0.07), step(fract(u * 2.5), 0.08)); mask = lines * on; light = vLight * (0.5 + 0.7 * lit); }
+      if (vDress.x > 0.5 && (vPart < 0.5 || (vPart > 1.5 && vPart < 3.5) || (vPart > 6.5 && vPart < 7.5))) c = drDress(c, u);
       c = mix(c, light, mask);
       if (abs(vIndex - uHover) < 0.5) c += vec3(0.16, 0.14, 0.2);
       if (abs(vIndex - uSelected) < 0.5) c = mix(c, vec3(0.9, 0.86, 0.8), 0.45 + 0.2 * sin(uTime * 5.0));
@@ -568,9 +749,9 @@ const cityMat = new THREE.ShaderMaterial({
 function instanced(kind, N, opts = {}) {
   const geo = geometryOf(kind);
   const mk = (size, dyn) => { const a = new THREE.InstancedBufferAttribute(new Float32Array(N * size), size); if (dyn) a.setUsage(THREE.DynamicDrawUsage); return a; };
-  const attrs = { body: mk(3, true), light: mk(3, true), lit: mk(1, true), dim: mk(1, true), index: mk(1), seed: mk(1), win: mk(4) };
+  const attrs = { body: mk(3, true), light: mk(3, true), lit: mk(1, true), dim: mk(1, true), index: mk(1), seed: mk(1), win: mk(4), dress: mk(2) };
   geo.setAttribute('aBody', attrs.body); geo.setAttribute('aLight', attrs.light); geo.setAttribute('aLit', attrs.lit); geo.setAttribute('aDim', attrs.dim);
-  geo.setAttribute('aIndex', attrs.index); geo.setAttribute('aSeed', attrs.seed); geo.setAttribute('aWin', attrs.win);
+  geo.setAttribute('aIndex', attrs.index); geo.setAttribute('aSeed', attrs.seed); geo.setAttribute('aWin', attrs.win); geo.setAttribute('aDress', attrs.dress);
   const mesh = new THREE.InstancedMesh(geo, cityMat, N);
   mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
   mesh.frustumCulled = false;
@@ -583,9 +764,13 @@ nodes.forEach((n, i) => { n.idx = i; const f = formOf(n); n.kind = f[0]; n.w = f
 const groups = {};
 for (const n of nodes) (groups[n.kind] = groups[n.kind] || []).push(n.idx);
 const kinds = {};
+// C11.1: one static material family per district (0 = none), and whether the building hosts a venue (C11.2).
+const DRESS_FAMILY = { core: 1, episodic: 2, semantic: 3, procedural: 4, prospective: 5, working: 6, jhon: 7, prasma: 8, branding: 9, onebrain: 10, reef: 11, inbox: 12 };
+const venueHostIds = new Set((DATA.design.venues || []).map(v => v.host));
 for (const [kind, list] of Object.entries(groups)) {
   const set = instanced(kind, list.length, { nodes: list });
-  list.forEach((ni, k) => { const n = nodes[ni]; n.slot = k; set.attrs.index.setX(k, ni); set.attrs.seed.setX(k, (n.id % 977) / 977); set.attrs.win.setXYZW(k, ...styleOf(n.district).win); });
+  list.forEach((ni, k) => { const n = nodes[ni]; n.slot = k; set.attrs.index.setX(k, ni); set.attrs.seed.setX(k, (n.id % 977) / 977); set.attrs.win.setXYZW(k, ...styleOf(n.district).win);
+    set.attrs.dress.setXY(k, DRESS_FAMILY[n.district] || 0, venueHostIds.has(n.id) ? 1 : 0); });
   kinds[kind] = set;
 }
 const buildingMeshes = Object.values(kinds).map(s => s.mesh);
@@ -594,7 +779,7 @@ const staticSet = (set, k, pos, scale, rotY, body, light, seed) => {
   dummy.position.copy(pos); dummy.rotation.set(0, rotY, 0); dummy.scale.set(...scale); dummy.updateMatrix();
   set.mesh.setMatrixAt(k, dummy.matrix);
   set.attrs.body.setXYZ(k, ...lin(body)); set.attrs.light.setXYZ(k, ...lin(light)); set.attrs.lit.setX(k, 1); set.attrs.dim.setX(k, 1);
-  set.attrs.index.setX(k, -9); set.attrs.seed.setX(k, seed); set.attrs.win.setXYZW(k, 0.5, 0.5, 3, 0.5);
+  set.attrs.index.setX(k, -9); set.attrs.seed.setX(k, seed); set.attrs.win.setXYZW(k, 0.5, 0.5, 3, 0.5); set.attrs.dress.setXY(k, 0, 0);
 };
 const MATTE = hex('#2a2433');
 
@@ -720,8 +905,11 @@ function updateWeek(t) {
   antennas.mesh.instanceMatrix.needsUpdate = true;
   chimneyNodes.forEach((n, k) => { dummy.position.copy(n.chimneyBase); dummy.rotation.set(0, 0, 0); dummy.scale.set(0.2, Math.max(0.0001, n.h * 1.9 * n.rise), 0.2); dummy.updateMatrix(); chimneys.mesh.setMatrixAt(k, dummy.matrix); });
   chimneys.mesh.instanceMatrix.needsUpdate = true;
-  cars.mesh.count = Math.min(tier.current===3?CARS:tier.current===2?Math.round(CARS*.6):70, Math.max(12, Math.round(24 + validEdges.length / 18)));
+  cars.mesh.count = vehicleCount();
   updateSigns();
+  // Venues follow their hosts (C4.4); updated before the inspector reads them.
+  venues.update();
+  commitStreetGlow();
   renderTime();
 }
 
@@ -873,6 +1061,10 @@ function renderInspector() {
   else if (n.state === 'foundation') note = 'A foundation: the note has no front-matter, so it has no date and stays unlit.';
   else if (n.state === 'absent') note = `Not built yet. It appears in week ${appearWeek(n)}.`;
   $('i-note').textContent = note;
+  // C4.7: a venue on the ground floor shows its name, type and state above the building's own card.
+  const venue = venues.of(n), venueEl = $('i-venue');
+  venueEl.hidden = !venue || !venue.present;
+  if (venue && venue.present) { $('i-venue-name').textContent = venue.name; venueEl.style.setProperty('--c', '#' + venue.color.getHexString()); $('i-venue-meta').textContent = venue.word + ' · ' + venue.state; }
 }
 $('i-close').addEventListener('click', () => select(-1));
 $('i-focus').addEventListener('click', () => {
@@ -951,6 +1143,7 @@ function frame() {
   if (state.ride >= 0) updateRide(dt);
   else { if (ptrDirty) { ptrDirty = false; const hit = pick(); setHover(hit ? hit.idx : -1); } controls.update(); }
   cityMat.uniforms.uTime.value = reduced ? 0 : now;
+  cityMat.uniforms.uDressTime.value = reduced ? 0 : now;
   placeLabels();
   if (bloomOn) composer.render(); else renderer.render(scene, camera);
 }

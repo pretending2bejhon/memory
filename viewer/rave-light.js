@@ -47,7 +47,7 @@ const tier = (() => {
   let current=phone?1:3,head=0,count=0,sum=0,clockMs=0,fastMs=0,changedAt=0;
   function apply(){
     crowd.applyTier(current);
-    cars.mesh.count=Math.min(current===3?CARS:current===2?Math.round(CARS*.6):70,Math.max(12,Math.round(24+validEdges.length/18)));
+    cars.mesh.count=vehicleCount();
     resize();
   }
   const api={

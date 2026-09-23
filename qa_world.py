@@ -50,17 +50,26 @@ LUMINANCE_TRACE = """() => {
     values=new Uint32Array(901*64*36),linear=new Float64Array(256);
   for(let i=0;i<256;i++){const v=i/255;linear[i]=v<=.04045?v/12.92:Math.pow((v+.055)/1.055,2.4);}
   const start=performance.now();
-  const trace=window.__qaWorldFlash={done:false,count:0,
+  const trace=window.__qaWorldFlash={done:false,count:0,torn:0,
     times,values,start};let next=0;
   function tick(now){
     const elapsed=now-start;
     if(elapsed>=next&&elapsed<30000){
       ctx.drawImage(source,0,0,64,36);
       const pixels=ctx.getImageData(0,0,64,36).data,offset=trace.count*64*36;
-      for(let i=0;i<64*36;i++)trace.values[offset+i]=Math.round(1000000*(
-        .2126*linear[pixels[i*4]]+.7152*linear[pixels[i*4+1]]+
-        .0722*linear[pixels[i*4+2]]));
-      trace.times[trace.count++]=elapsed;next+=1000/30;
+      // A torn read of the WebGL canvas comes back with a block of exact black. The page never draws
+      // (0,0,0) (its clear colour is #030913), so that read is taken again on the next frame, on the
+      // same 30 Hz grid. A page that really went black would keep failing and break the 67 ms
+      // coverage rule, so the retry cannot hide a flash.
+      let torn=false;
+      for(let i=0;i<64*36;i++)if(!(pixels[i*4]|pixels[i*4+1]|pixels[i*4+2])){torn=true;break;}
+      if(torn)trace.torn++;
+      else{
+        for(let i=0;i<64*36;i++)trace.values[offset+i]=Math.round(1000000*(
+          .2126*linear[pixels[i*4]]+.7152*linear[pixels[i*4+1]]+
+          .0722*linear[pixels[i*4+2]]));
+        trace.times[trace.count++]=elapsed;next+=1000/30;
+      }
     }
     if(elapsed>=30000){trace.done=true;return;}
     requestAnimationFrame(tick);
@@ -282,13 +291,13 @@ def measure_flash(engine, mode, setting, path, baseline=False):
     wait_probe(engine, "() => window.__qaWorldFlash.done", 45)
     trace = engine.evaluate("""() => {
       const q=window.__qaWorldFlash;
-      return {done:q.done,start:q.start,times:Array.from(q.times.subarray(0,q.count)),
+      return {done:q.done,start:q.start,torn:q.torn,times:Array.from(q.times.subarray(0,q.count)),
         frames:Array.from({length:q.count},(_,i)=>
           Array.from(q.values.subarray(i*64*36,(i+1)*64*36),value=>value/1000000))};
     }""")
     path("world-luminance-" + mode + "-" + setting.lower() + ".json").write_text(
         json.dumps(trace, separators=(",", ":")), encoding="utf-8")
-    return {"mode": mode, "setting": setting, **flash_summary(trace)}
+    return {"mode": mode, "setting": setting, "tornReadsRetried": trace.get("torn", 0), **flash_summary(trace)}
 
 
 def measure_foundations(engine, path):
@@ -725,9 +734,17 @@ def measure_rave_dynamics(engine, path):
     return value, checks
 
 
-def verify_crowd(engine, path):
+OTHER_CAPS = {3: 88, 2: 53, 1: 20}
+PEOPLE_BUDGET = {3: 400 + 480 + 12 + 88, 2: 240 + 288 + 12 + 53, 1: 220}
+
+
+def verify_crowd(engine, path, phase=2):
     """V2 gates: census per tier, dancers follow the timeline formula, nobody inside a footprint,
-    bounce minima locked to each dancer's own beat within a sixteenth."""
+    bounce minima locked to each dancer's own beat within a sixteenth. From V3 the census per tier also
+    counts the others (C3.7) with the page switched to each tier the way the governor switches it (crowd
+    caps, vehicle count, two rendered frames so riders follow their chivas): others within 88/53/20,
+    some others at Tier 3, and walkers + dancers + DJs + others within the tier's people budget
+    (C13.1: 220 at Tier 1)."""
     result = engine.evaluate("""() => {
       const v=window.__vc,c=v.crowd,caps={3:[400,480],2:[240,288],1:[100,108]},tiers={};
       for(const level of [3,2,1]){c.applyTier(level);const n=c.census();
@@ -764,12 +781,151 @@ def verify_crowd(engine, path):
           resolve({rows,pass:rows.length>0&&rows.every(r=>r.minima>=3&&r.maxError<=1/16&&Math.abs(r.offset)<=1/16)});}}
       requestAnimationFrame(tick);
     })""")
-    report = {"census": result, "inside": inside, "bounce": bounce}
+    others = None
+    if phase >= 3:
+        others = engine.evaluate("""() => new Promise(resolve => {
+          const v=window.__vc,c=v.crowd,desc=Object.getOwnPropertyDescriptor(v.tier,'current'),levels=[3,2,1],rows={};let k=0;
+          function next(){
+            if(k===levels.length){Object.defineProperty(v.tier,'current',desc);c.applyTier(v.tier.current);v.updateWeek(12);resolve(rows);return;}
+            const level=levels[k++];Object.defineProperty(v.tier,'current',{get:()=>level,configurable:true});c.applyTier(level);v.updateWeek(12);
+            requestAnimationFrame(()=>requestAnimationFrame(()=>{const n=c.census();
+              const riders=c.people.filter((p,i)=>p.kind===3&&p.pose==='ride'&&c.isVisible(i,p)).length;
+              rows[level]={walkers:n.walkers,dancers:n.dancers,djs:n.djs,others:n.others,riders,total:n.walkers+n.dancers+n.djs+n.others};next();}));
+          }
+          next();
+        })""")
+        for level, row in others.items():
+            level = int(level)
+            row["othersCap"] = OTHER_CAPS[level]
+            row["budget"] = PEOPLE_BUDGET[level]
+            row["pass"] = (row["others"] <= OTHER_CAPS[level] and row["total"] <= PEOPLE_BUDGET[level] and
+                           (level != 3 or row["others"] > 0))
+    report = {"census": result, "inside": inside, "bounce": bounce, "others": others}
     path("world-crowd.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
-    checks = {"people census per tier": all(row["pass"] for row in result["tiers"].values()),
+    checks = {"people census per tier": all(row["pass"] for row in result["tiers"].values()) and
+                                        (others is None or (len(others) == 3 and all(row["pass"] for row in others.values()))),
               "dancers follow density and brightness": result["week0"]["pass"] and result["week12"]["pass"] and result["week12"]["total"] > result["week0"]["total"],
               "no person inside a footprint": inside["checked"] > 0 and inside["inside"] == 0,
               "bounce minima within a sixteenth": bounce["pass"]}
+    return report, checks
+
+
+VENUE_TARGET = 93
+VEHICLE_ALLOCATION = {"compact": 24, "sedan": 28, "taxi": 26, "suv": 14, "van": 10, "bus": 6,
+                      "truck": 10, "moto": 18, "delivery": 18, "chiva": 6}
+VEHICLE_TIER_TOTAL = {3: 160, 2: 96, 1: 70}
+VEHICLE_TIER_FACTOR = {3: 1.0, 2: 0.6, 1: 70 / 160}
+
+
+def venue_targets():
+    """C4.3 per-district venue targets exactly as design.py computes them (Python rounding)."""
+    layout = json.loads((ROOT / "data" / "layout.json").read_text(encoding="utf-8"))
+    return {district: max(1, min(24, round(p["n"] / 12))) for district, p in layout["districts"].items()}
+
+
+def js_round(value):
+    """Math.round, which the page's timeline rule uses."""
+    return math.floor(value + 0.5)
+
+
+def verify_society(engine, path):
+    """V3 gates: venue census 93 +- 10 % with the per-district shortfall, every host a real note that is
+    neither a plaza nor a foundation, venue state and rendered buffers follow the host through a timeline
+    scrub (C4.4), and the vehicle census per type and tier (C5.2)."""
+    venues = engine.evaluate("""() => {
+      const v=window.__vc,ids=new Map(v.nodes.map(n=>[n.id,n])),seen=new Set(),rows=[];
+      for(const x of v.venues.items){const n=x.host;
+        rows.push({venue:x.index,district:x.district,host:n?n.id:null,kind:n?n.kind:null,created:n?n.created:null,
+          real:!!n&&ids.get(n.id)===n,repeat:!!n&&seen.has(n.id)});if(n)seen.add(n.id);}
+      return rows;
+    }""")
+    targets = venue_targets()
+    placed = {}
+    for row in venues:
+        placed[row["district"]] = placed.get(row["district"], 0) + 1
+    shortfall = {d: t - placed.get(d, 0) for d, t in sorted(targets.items()) if placed.get(d, 0) < t}
+    census = {"total": len(venues), "target": VENUE_TARGET, "targetSum": sum(targets.values()),
+              "perDistrict": {d: {"placed": placed.get(d, 0), "target": t} for d, t in sorted(targets.items())},
+              "shortfall": shortfall}
+    bad_hosts = [row for row in venues if not row["real"] or row["repeat"] or row["created"] is None
+                 or row["kind"] in ("plaza", "found")]
+    hosts = {"checked": len(venues), "bad": bad_hosts[:10], "badCount": len(bad_hosts)}
+    # Walk weeks 0 to 12 in quarter weeks. The expected state comes from the host's rendered light
+    # (its aLit attribute) and its rendered height (absent hosts are scaled to nothing). Patrons are
+    # checked both ways: shown exactly when the venue is open or quiet enough for them, its host has
+    # fully risen (rendered height) and their rank is inside the tier's extras cap.
+    scrub = engine.evaluate("""() => {
+      const v=window.__vc,V=v.venues,M=V.meshes,crowd=v.crowd,bad=[],counts={open:0,quiet:0,shut:0,absent:0};
+      const scale=(mesh,i)=>{const a=mesh.instanceMatrix.array,o=i*16;return Math.hypot(a[o],a[o+1],a[o+2])+Math.hypot(a[o+4],a[o+5],a[o+6]);};
+      const frontOpen=M.front.geometry.attributes.aOpen,terraces=new Map();
+      for(const f of V.furniture)if(f.venue>=0){if(!terraces.has(f.venue))terraces.set(f.venue,[]);terraces.get(f.venue).push(f);}
+      const patrons=new Map();crowd.people.forEach((p,i)=>{if(p.kind===3&&p.venue!==undefined){if(!patrons.has(p.venue))patrons.set(p.venue,[]);patrons.get(p.venue).push([i,p]);}});
+      let samples=0;
+      for(let step=0;step<=48;step++){const t=step/4;v.updateWeek(t);
+        for(const x of V.items){samples++;const n=x.host,set=v.kinds[n.kind],lit=set.attrs.lit.getX(n.slot);
+          const hostHeight=Math.hypot(...set.mesh.instanceMatrix.array.slice(n.slot*16+4,n.slot*16+7)),absent=hostHeight<.001;
+          const grown=Math.min(1,hostHeight/n.h*1.5)>=1-1e-6;
+          const want=absent?'absent':Math.abs(lit-.5)<1e-6?x.state:lit>=.5?'open':lit>=.15?'quiet':'shut';
+          counts[want]++;
+          const fail=reason=>bad.push({t,venue:x.index,host:n.id,want,got:x.state,lit,reason});
+          if(x.state!==want){fail('state');continue;}
+          const front=scale(M.front,x.index),awning=scale(M.awnings,x.index),sign=scale(x.signMesh,x.signSlot);
+          const openWant=want==='open'?1:want==='quiet'?.4:0;
+          if(want==='absent'){if(front>1e-6||awning>1e-6||sign>1e-6)fail('absent host shows a storefront, awning or sign');}
+          else{if(front<1e-3||sign<1e-3)fail('present venue without storefront or sign');
+            if(Math.abs(frontOpen.getX(x.index)-openWant)>1e-6||Math.abs(x.signMesh.geometry.attributes.aOpen.getX(x.signSlot)-openWant)>1e-6)fail('lit level');
+            if((want==='shut')!==(awning<1e-6))fail('awning');}
+          const terraceOn=want==='open'||want==='quiet';
+          for(const f of terraces.get(x.index)||[])if((scale(f.mesh,f.slot)>1e-3)!==terraceOn){fail('terrace '+f.kind);break;}
+          let seated=0;
+          for(const [i,p] of patrons.get(x.index)||[]){const shown=crowd.isVisible(i,p);if(shown&&p.pose==='sit')seated++;
+            const expect=terraceOn&&grown&&openWant>=(p.needs||0)&&(p.free===true||p.extraRank<crowd.state.extras);
+            if(shown!==expect){fail((shown?'patron shown ':'patron missing ')+p.pose);break;}}
+          // C4.4: a quiet venue has one or two patrons, whatever the page asks of them.
+          if(want==='quiet'&&seated>2)fail('quiet venue with '+seated+' seated patrons');
+        }}
+      v.updateWeek(12);
+      return {samples,weeks:49,counts,failures:bad.length,sample:bad.slice(0,8)};
+    }""")
+    vehicles = engine.evaluate("""(tiers) => new Promise(resolve => {
+      const v=window.__vc,allocated={},rendered={},edges=v.edges.filter(e=>e.appear<=12).length;
+      for(const [level,cap] of tiers){const per={};for(const c of v.carState)if(c.rank<cap)per[c.type]=(per[c.type]||0)+1;allocated[level]=per;}
+      const desc=Object.getOwnPropertyDescriptor(v.tier,'current'),levels=[3,2,1];let k=0;
+      function next(){
+        if(k===levels.length){Object.defineProperty(v.tier,'current',desc);v.updateWeek(12);resolve({allocated,rendered,edgesAtWeek12:edges,cars:v.carState.length});return;}
+        const level=levels[k++];Object.defineProperty(v.tier,'current',{get:()=>level,configurable:true});v.updateWeek(12);
+        requestAnimationFrame(()=>requestAnimationFrame(()=>{const per={};let total=0;
+          for(const c of v.carState){const a=c.mesh.instanceMatrix.array,o=c.slot*16;if(a[o+15]===1&&Math.hypot(a[o],a[o+1],a[o+2])>.5){per[c.type]=(per[c.type]||0)+1;total++;}}
+          rendered[level]={per,total};next();}));
+      }
+      next();
+    })""", [[level, cap] for level, cap in VEHICLE_TIER_TOTAL.items()])
+    base = max(12, js_round(24 + vehicles["edgesAtWeek12"] / 18))
+    tier_rows = {}
+    for level, cap in VEHICLE_TIER_TOTAL.items():
+        per = vehicles["allocated"][str(level)]
+        total = sum(per.values())
+        rows = {t: {"allocated": per.get(t, 0), "want": round(a * VEHICLE_TIER_FACTOR[level], 2)}
+                for t, a in VEHICLE_ALLOCATION.items()}
+        within = all(abs(r["allocated"] - r["want"]) <= 0.15 * r["want"] for r in rows.values())
+        visible = vehicles["rendered"][str(level)]
+        expected_visible = min(cap, js_round(base * VEHICLE_TIER_FACTOR[level]))
+        tier_rows[level] = {"allocatedTotal": total, "cap": cap, "perType": rows, "perTypeWithin15": within,
+                            "visible": visible["total"], "expectedVisible": expected_visible,
+                            "visiblePerType": visible["per"],
+                            "visibleWithinAllocation": all(visible["per"].get(t, 0) <= per.get(t, 0) for t in VEHICLE_ALLOCATION)}
+    vehicle_pass = (vehicles["cars"] == VEHICLE_TIER_TOTAL[3] and
+                    all(row["allocatedTotal"] == row["cap"] and row["visible"] == row["expectedVisible"] and
+                        row["visibleWithinAllocation"] for row in tier_rows.values()) and
+                    tier_rows[3]["perTypeWithin15"] and tier_rows[2]["perTypeWithin15"])
+    report = {"census": census, "hosts": hosts, "scrub": scrub,
+              "vehicles": {"timelineRuleAtWeek12": base, "edgesAtWeek12": vehicles["edgesAtWeek12"],
+                           "cars": vehicles["cars"], "tiers": tier_rows}}
+    path("world-society.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+    checks = {"venue census 93 plus or minus 10 percent": abs(census["total"] - VENUE_TARGET) <= 0.1 * VENUE_TARGET,
+              "venue hosts valid": hosts["checked"] > 0 and hosts["badCount"] == 0,
+              "venue state follows host": scrub["samples"] == 49 * len(venues) and len(venues) > 0 and scrub["failures"] == 0,
+              "vehicle census per type": vehicle_pass}
     return report, checks
 
 
@@ -940,7 +1096,8 @@ def self_test():
               "large area flash detected": all(rolling_max(flash_pairs(times, row)) == 4 for row in large_traces),
               "77 specified windows": len(large_traces) == 77,
               "V0 scenes": [s["id"] for s in SCENES if s["fromPhase"] <= 0] == ["S1", "S3", "S5"],
-              "V2 adds stage only": [s["id"] for s in SCENES if s["fromPhase"] <= 2] == ["S1", "S2", "S3", "S5"]}
+              "V2 adds stage only": [s["id"] for s in SCENES if s["fromPhase"] <= 2] == ["S1", "S2", "S3", "S5"],
+              "V3 scene set unchanged": [s["id"] for s in SCENES if s["fromPhase"] <= 3] == ["S1", "S2", "S3", "S5"]}
     print(json.dumps(checks, indent=2))
     return int(not all(checks.values()))
 
@@ -963,6 +1120,7 @@ def main():
     path = lambda suffix: output / (args.prefix + "-" + suffix)
     report = {"url": args.url, "phase": args.phase, "baseline": args.baseline,
               "scope": "C13.3 phase-scoped scenes and C12.3 area flash windows",
+              "sceneSet": [s["id"] for s in SCENES if s["fromPhase"] <= phase] + ["Heap"],
               "performance": [], "errors": [], "checks": {}}
     checks = report["checks"]
     try:
@@ -1026,8 +1184,12 @@ def main():
                     checks.update(dynamics_checks)
                 if phase >= 2:
                     eng.evaluate("() => window.__vc.updateWeek(12)")
-                    report["crowd"], crowd_checks = verify_crowd(eng, path)
+                    report["crowd"], crowd_checks = verify_crowd(eng, path, phase)
                     checks.update(crowd_checks)
+                if phase >= 3:
+                    eng.evaluate("() => window.__vc.updateWeek(12)")
+                    report["society"], society_checks = verify_society(eng, path)
+                    checks.update(society_checks)
                 report["lightPolicy"], policy_checks = verify_light_policy(eng)
                 checks.update(policy_checks)
                 report["governor"] = verify_governor(eng, args.url)
