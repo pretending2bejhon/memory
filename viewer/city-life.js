@@ -1,15 +1,25 @@
 // Arc-length streets are shared with the Blender scene. Links remain a separate layer.
 const phone = Math.min(window.innerWidth, window.innerHeight) < 720;
 const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+// A route with a shared stretch (the Archive east rim road, C6.2, which runs back to its start on Memory
+// boulevard's east side) is only its own stretch here: an open street that never draws or runs the
+// boulevard's asphalt twice. It keeps its own width and the clearance of its own stretch.
 const routes = DATA.design.routes.map(r => {
-  const points = r.points.map(p => W(p[0], p[1], r.z));
+  let own = r.points;
+  if (r.shared) { let s = 0; own = [r.points[0]];
+    for (let i = 1; i < r.points.length; i++) { s += Math.hypot(r.points[i][0]-r.points[i-1][0], r.points[i][1]-r.points[i-1][1]); if (s > r.shared[0].from + 1e-4) break; own.push(r.points[i]); } }
+  const open = Boolean(r.shared), points = own.map(p => W(p[0], p[1], r.z));
   const lengths = [0];
-  for (let i = 1; i <= points.length; i++) lengths.push(lengths[i-1]+points[i-1].distanceTo(points[i%points.length]));
-  return {...r, points, lengths, length:lengths.at(-1), width:r.district === 'episodic' ? .54 : .88};
+  for (let i = 1; i <= points.length - (open ? 1 : 0); i++) lengths.push(lengths[i-1]+points[i-1].distanceTo(points[i%points.length]));
+  return {...r, points, lengths, length:lengths.at(-1), open, width:r.width ?? (r.district === 'episodic' ? .54 : .88),
+    clearance:open ? r.clearanceOwn : r.clearance};
 });
+// An open route folds back at its ends, so anything moving along it turns round there.
 function sampleRoute(route, distance, out = new THREE.Vector3(), offset = 0) {
-  const s = ((distance % route.length)+route.length)%route.length;
-  let lo=0, hi=route.points.length;
+  let s;
+  if (route.open) { const L2 = 2*route.length, f = ((distance % L2)+L2)%L2; s = f > route.length ? L2-f : f; }
+  else s = ((distance % route.length)+route.length)%route.length;
+  let lo=0, hi=route.points.length-(route.open ? 1 : 0);
   while(lo+1<hi) { const mid=(lo+hi)>>1; if(route.lengths[mid]<=s) lo=mid; else hi=mid; }
   const a=route.points[lo], b=route.points[(lo+1)%route.points.length];
   out.lerpVectors(a,b,(s-route.lengths[lo])/(route.lengths[lo+1]-route.lengths[lo]));
@@ -17,12 +27,15 @@ function sampleRoute(route, distance, out = new THREE.Vector3(), offset = 0) {
   return out;
 }
 const streetGroup = new THREE.Group(); scene.add(streetGroup);
-function ribbon(route, width, offset, height, material) {
-  const pos=[], uv=[], indices=[];
-  for(let i=0;i<=route.points.length;i++) {
-    const d=route.lengths[i];
-    for(const side of [-1,1]) { const p=sampleRoute(route,d,new THREE.Vector3(),offset+side*width/2); pos.push(p.x,p.y+height,p.z); uv.push(side===-1?0:1,d); }
-    if(i<route.points.length) { const j=i*2; indices.push(j,j+2,j+1,j+1,j+2,j+3); }
+// width and offset may vary along the road (functions of d); keep(d, offset) drops a segment.
+function ribbon(route, width, offset, height, material, keep) {
+  const pos=[], uv=[], indices=[], last=route.lengths.length-1;
+  const widthAt=typeof width==='function'?width:()=>width, offsetAt=typeof offset==='function'?offset:()=>offset;
+  for(let i=0;i<=last;i++) {
+    const d=route.lengths[i],w=widthAt(d),o=offsetAt(d);
+    for(const side of [-1,1]) { const p=sampleRoute(route,d,new THREE.Vector3(),o+side*w/2); pos.push(p.x,p.y+height,p.z); uv.push(side===-1?0:1,d); }
+    const mid=i<last?(d+route.lengths[i+1])/2:0;
+    if(i<last&&(!keep||keep(mid,offsetAt(mid)))) { const j=i*2; indices.push(j,j+2,j+1,j+1,j+2,j+3); }
   }
   const geo=new THREE.BufferGeometry(); geo.setAttribute('position',new THREE.Float32BufferAttribute(pos,3)); geo.setAttribute('uv',new THREE.Float32BufferAttribute(uv,2)); geo.setIndex(indices); geo.computeVertexNormals();
   const mesh=new THREE.Mesh(geo,material); streetGroup.add(mesh); return mesh;
@@ -44,13 +57,14 @@ function streetGlowSource(p,color,weight){
   routes.forEach((route,ri)=>{
     const pts=route.points;let best=0,bd=Infinity;
     for(let i=0;i<pts.length;i++){const dx=pts[i].x-p.x,dz=pts[i].z-p.z,d=dx*dx+dz*dz;if(d<bd){bd=d;best=i;}}
+    if(route.open&&best===pts.length-1)best--;
     const a=pts[best],b=pts[(best+1)%pts.length],dx=b.x-a.x,dz=b.z-a.z,l=Math.hypot(dx,dz)||1;
     const lateral=((p.x-a.x)*dz-(p.z-a.z)*dx)/l,along=((p.x-a.x)*dx+(p.z-a.z)*dz)/l,reach=Math.abs(lateral)-route.width/2;
     if(reach>1.5)return;
     const G=routeGlow[ri],s=route.lengths[best]+along,w=weight*(1-Math.max(0,reach-.3)/1.2),row=lateral>0?1:0;
     for(let c=Math.floor((s-.4)/route.length*G.bins);c<=Math.ceil((s+.4)/route.length*G.bins);c++){
       const k=w*Math.max(0,1-Math.abs((c+.5)/G.bins*route.length-s)/.4);
-      if(k>0)taps.push(ri,((c%G.bins)+G.bins)%G.bins,row,k);
+      if(k>0&&(!route.open||(c>=0&&c<G.bins)))taps.push(ri,((c%G.bins)+G.bins)%G.bins,row,k);
     }
   });
   if(!taps.length)return -1;
@@ -119,20 +133,73 @@ function sidewalkMat(width){
       }`}));
   return sidewalkMats.get(width);
 }
-const markingMat = new THREE.MeshBasicMaterial({color:col(hex('#b5b7a1')),side:THREE.DoubleSide,transparent:true,opacity:.38});
+// Flat transparent decals render in one pass: three.js draws a transparent DoubleSide material twice
+// (back then front) and flags it for a program lookup each time, which allocated about 16 MB/s of
+// garbage from the street markings alone (V4a trace). A flat ribbon looks the same either way.
+const markingMat = new THREE.MeshBasicMaterial({color:col(hex('#b5b7a1')),side:THREE.DoubleSide,transparent:true,opacity:.38,forceSinglePass:true});
+// Junctions (C6.2 forks now, bridge tees next): an open route widens from the road it forks off to its
+// own width over its first and last 1.2 units, sits 4 mm lower so the through road's surface wins
+// where they overlap, and no road paints an edge line, dash or arrow, or stands a lamp, inside another
+// road's carriageway.
+const forkWidth=route=>route.open&&route.shared?routes[route.shared[0].route].width:route.width;
+function drawnWidth(route,d){
+  if(!route.open)return route.width;
+  const e=Math.min(d,route.length-d),u=Math.min(1,Math.max(0,e/1.2)),k=u*u*(3-2*u),w0=forkWidth(route);
+  return w0+(route.width-w0)*k;
+}
+const carriageGrid=new Map(),carriageSegs=[];
+routes.forEach((route,ri)=>{const pts=route.points,n=pts.length-(route.open?1:0);
+  for(let i=0;i<n;i++){const a=pts[i],b=pts[(i+1)%pts.length],k=carriageSegs.length;carriageSegs.push({ri,a,b,s0:route.lengths[i],s1:route.lengths[i+1]});
+    for(let x=Math.floor((Math.min(a.x,b.x)-.6)/2);x<=Math.floor((Math.max(a.x,b.x)+.6)/2);x++)
+      for(let z=Math.floor((Math.min(a.z,b.z)-.6)/2);z<=Math.floor((Math.max(a.z,b.z)+.6)/2);z++){const c=x*65536+z;if(!carriageGrid.has(c))carriageGrid.set(c,[]);carriageGrid.get(c).push(k);}}});
+// Bridge tees and the Archive rim links (roads.js draws both). A bridge's mouth is its stub outside the
+// ring's carriageway plus the two fillet corners out to the curb sidewalk's outer edge; a link is a fork,
+// like the rim road: it leaves an avenue at the start of its corner and runs along the rim to the next
+// avenue, so its whole carriageway counts. No road paints an edge line, dash or arrow, or stands a lamp,
+// inside either; a ring keeps its centre dashes and lane arrows at a tee, since the mouth starts at its kerb.
+const roadMouths=[],roadLinks=[];
+for(const b of DATA.design.bridges||[]){const P=b.points,n=P.length;
+  b.ends.forEach((e,k)=>{const a=k?P[n-1]:P[0],c=k?P[n-2]:P[1],l=Math.hypot(c[0]-a[0],c[1]-a[1])||1;
+    roadMouths.push({x:a[0],y:a[1],z:e.z,ux:(c[0]-a[0])/l,uy:(c[1]-a[1])/l,s0:.44,s1:Math.max(...e.fillets.map(f=>f.bridgeS))+.05,half:.44,fillets:e.fillets});});}
+for(const st of DATA.design.streets||[]){const P=st.points;
+  roadLinks.push({P,z:st.z,half:st.width/2,x0:Math.min(...P.map(q=>q[0]))-.6,x1:Math.max(...P.map(q=>q[0]))+.6,y0:Math.min(...P.map(q=>q[1]))-.6,y1:Math.max(...P.map(q=>q[1]))+.6});}
+function inRoadMouth(p,margin=0){
+  const x=p.x,y=-p.z;
+  for(const m of roadMouths){if(Math.abs(p.y-m.z)>.3)continue;const dx=x-m.x,dy=y-m.y;if(dx*dx+dy*dy>9)continue;
+    const s=dx*m.ux+dy*m.uy,lat=Math.abs(dx*m.uy-dy*m.ux);
+    if(s>=m.s0-margin&&s<=m.s1&&lat<m.half+margin)return true;
+    for(const f of m.fillets){const fx=x-f.cx,fy=y-f.cy,d=Math.hypot(fx,fy);if(d<f.r-.13-margin||d>f.r+.44)continue;
+      const span=f.a1-f.a0,rel=((Math.atan2(fy,fx)*180/Math.PI-f.a0)%360+540)%360-180;if(rel/span>0&&rel/span<1)return true;}}
+  for(const k of roadLinks){if(Math.abs(p.y-k.z)>.3||x<k.x0||x>k.x1||y<k.y0||y>k.y1)continue;
+    for(let i=0;i+1<k.P.length;i++){const a=k.P[i],b=k.P[i+1],dx=b[0]-a[0],dy=b[1]-a[1],l2=dx*dx+dy*dy,t=l2?Math.max(0,Math.min(1,((x-a[0])*dx+(y-a[1])*dy)/l2)):0;
+      if(Math.hypot(x-a[0]-dx*t,y-a[1]-dy*t)<k.half+margin)return true;}}
+  return false;
+}
+function inOtherCarriageway(p,own,margin=0){
+  if(inRoadMouth(p,margin))return true;
+  const cell=carriageGrid.get(Math.floor(p.x/2)*65536+Math.floor(p.z/2));if(!cell)return false;
+  for(const k of cell){const g=carriageSegs[k];if(g.ri===own)continue;
+    const dx=g.b.x-g.a.x,dz=g.b.z-g.a.z,l2=dx*dx+dz*dz,t=l2?Math.max(0,Math.min(1,((p.x-g.a.x)*dx+(p.z-g.a.z)*dz)/l2)):0;
+    if(Math.hypot(p.x-g.a.x-dx*t,p.z-g.a.z-dz*t)<drawnWidth(routes[g.ri],g.s0+(g.s1-g.s0)*t)/2+margin)return true;}
+  return false;
+}
+const clipPoint=new THREE.Vector3();
 const dashMatrices=[],arrowMatrices=[];
 for(const [ri,route] of routes.entries()) {
-  ribbon(route,route.width+.26,0,-.012,sidewalkMat(route.width+.26));
-  ribbon(route,route.width,0,.005,wetStreet(styleOf(route.district).light,route,routeGlow[ri]));
-  for(const side of [-1,1]) ribbon(route,.018,side*(route.width/2+.025),.015,new THREE.MeshBasicMaterial({color:col(styleOf(route.district).light),transparent:true,opacity:.42,side:THREE.DoubleSide}));
+  const drop=route.open?-.004:0,w=d=>drawnWidth(route,d),clear=(d,o)=>!inOtherCarriageway(sampleRoute(route,d,clipPoint,o),ri,-.005);
+  ribbon(route,d=>w(d)+.26,0,-.012+drop,sidewalkMat(route.width+.26));
+  ribbon(route,w,0,.005+drop,wetStreet(styleOf(route.district).light,route,routeGlow[ri]));
+  for(const side of [-1,1]) ribbon(route,.018,d=>side*(w(d)/2+.025),.015+drop,new THREE.MeshBasicMaterial({color:col(styleOf(route.district).light),transparent:true,opacity:.42,side:THREE.DoubleSide,forceSinglePass:true}),clear);
   for(let d=0;d<route.length;d+=1.8) {
+    if(!clear(d,0)||!clear(d+.35,0))continue;
     const p=sampleRoute(route,d),q=sampleRoute(route,d+.35);
     dummy.rotation.set(-Math.PI/2,0,Math.atan2(q.x-p.x,q.z-p.z));dummy.position.copy(p);dummy.position.y+=.022;dummy.scale.set(1,1,1);dummy.updateMatrix();dashMatrices.push(dummy.matrix.clone());
   }
   // C11.3: a lane arrow in each lane every 7.2 units, pointing the way that lane's traffic drives.
   // Traffic keeps to the right (society.js), so the lane driving forward along the road is the negative offset.
-  const lane=route.district==='episodic'?.1:.14;
+  const lane=route.width<.6?.1:.14;
   for(let d=3.6;d<route.length-.5;d+=7.2) for(const dir of [1,-1]) {
+    if(!clear(d,-lane*dir)||!clear(d+.3*dir,-lane*dir))continue;
     const p=sampleRoute(route,d,new THREE.Vector3(),-lane*dir),q=sampleRoute(route,d+.3*dir,new THREE.Vector3(),-lane*dir);
     dummy.rotation.set(0,Math.atan2(q.x-p.x,q.z-p.z),0);dummy.position.copy(p);dummy.position.y+=.021;dummy.scale.set(1,1,1);dummy.updateMatrix();arrowMatrices.push(dummy.matrix.clone());
   }
@@ -176,11 +243,13 @@ const glowTexture=new THREE.CanvasTexture(glowCanvas);
 const lifeLamps=[];
 for(const [ri,route] of routes.entries()) for(let d=1.5;d<route.length;d+=route.district==='episodic'?4.6:3.8) {
   const p=sampleRoute(route,d,new THREE.Vector3(),route.width/2+.07);
-  if(pointBlocked(new THREE.Vector3(p.x,p.y+.7,p.z),.06,false)) continue;
+  if(pointBlocked(new THREE.Vector3(p.x,p.y+.7,p.z),.06,false)||inOtherCarriageway(p,ri,.06)) continue;
+  // At a fork the through road's lamp already lights the corner.
+  if(route.open&&lifeLamps.some(l=>l.p.distanceTo(p)<1)) continue;
   lifeLamps.push({p,route,d});
 
 }
-const pavementPools=new THREE.InstancedMesh(new THREE.PlaneGeometry(1.5,2.0),new THREE.MeshBasicMaterial({map:glowTexture,color:0xffffff,transparent:true,opacity:.48,blending:THREE.AdditiveBlending,depthWrite:false,side:THREE.DoubleSide}),lifeLamps.length);
+const pavementPools=new THREE.InstancedMesh(new THREE.PlaneGeometry(1.5,2.0),new THREE.MeshBasicMaterial({map:glowTexture,color:0xffffff,transparent:true,opacity:.48,blending:THREE.AdditiveBlending,depthWrite:false,side:THREE.DoubleSide,forceSinglePass:true}),lifeLamps.length);
 lifeLamps.forEach((s,k)=>{dummy.position.copy(s.p);dummy.position.y+=.025;dummy.rotation.set(-Math.PI/2,0,0);dummy.scale.set(1,1,1);dummy.updateMatrix();pavementPools.setMatrixAt(k,dummy.matrix);pavementPools.setColorAt(k,col(styleOf(s.route.district).light));});streetGroup.add(pavementPools);
 const boulevardLamps=instanced('lamp',lifeLamps.length);
 lifeLamps.forEach((s,k)=>staticSet(boulevardLamps,k,s.p,[.85,1.05,.85],0,MATTE,styleOf(s.route.district).light,k*.13));

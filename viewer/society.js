@@ -398,7 +398,8 @@ const steam=new THREE.Points(steamGeometry,new THREE.ShaderMaterial({uniforms:{u
   }`}));
 steam.frustumCulled=false;venueGroup.add(steam);
 const archiveBulbs=[],archiveSeeds=[];
-for(const route of routes.filter(r=>r.district==='episodic'))for(let d=1.2;d<route.length;d+=2.4){
+// Across the four avenues only: the east rim road (an open route) is not an avenue (C4.5).
+for(const route of routes.filter(r=>r.district==='episodic'&&!r.open))for(let d=1.2;d<route.length;d+=2.4){
   const a=sampleRoute(route,d,new THREE.Vector3(),-.46),b=sampleRoute(route,d,new THREE.Vector3(),.46);
   // Only across the straights: the avenue keeps its heading from half a unit before to half after.
   const p0=sampleRoute(route,d-.6,new THREE.Vector3()),p1=sampleRoute(route,d-.4,new THREE.Vector3()),q0=sampleRoute(route,d+.4,new THREE.Vector3()),q1=sampleRoute(route,d+.6,new THREE.Vector3());
@@ -423,7 +424,8 @@ const VEHICLE_PAINT={compact:['#c9ccd1','#1c1f24','#8a1c1c','#23395d','#e9e9e9',
   moto:['#15171b','#b3122e','#1d6fd8'],delivery:['#15171b','#2b2f36'],chiva:['#e8392f','#1f6fd1','#f2c230','#2aa64a']};
 const VEHICLE_TRIM={compact:['#15171b'],sedan:['#15171b'],taxi:['#15171b'],suv:['#15171b'],van:['#15171b'],bus:['#f4f1ec'],truck:['#f4f1ec','#dfe3e8'],
   moto:['#f4f1ec','#ffd400','#e63946'],delivery:['#ff7a1a','#e63946','#ffd400'],chiva:['#ffd060','#ff5fa2','#5ee6ff','#8cff6a']};
-// Parts: 0 paint, 1 string lights (chiva), 2 trim, 3 dark glass, 4 roof or route sign, 5 headlight, 6 taillight, 7 lit interior, 8 rubber.
+// Parts: 0 paint, 1 string lights (chiva), 2 trim, 3 dark glass, 4 roof or route sign, 5 headlight, 6 taillight, 7 lit interior, 8 rubber,
+// 9 steady glow in the trim colour (the light cycles' rims and lines).
 // Overall boxes match the C5.1 table: wheels sit inside the body width, and a two-wheeler's rider is part of its height.
 function vehicleGeometry(type){
   const g=new GB(),wheel=(x,z,r=.022)=>g.box(x-.012,0,z-r,x+.012,r*2,z+r,8);
@@ -477,20 +479,28 @@ const vehicleMat=new THREE.ShaderMaterial({fog:true,uniforms:Object.assign(THREE
       else if(vPart<5.5)c=vec3(1.0,.96,.84)*1.5;
       else if(vPart<6.5)c=vec3(1.0,.1,.05)*(.7+1.6*vBrake);
       else if(vPart<7.5)c=vec3(1.0,.84,.55)*.85;
-      else c=vec3(.018,.02,.024);
+      else if(vPart<8.5)c=vec3(.018,.02,.024);
+      else c=vTrim*1.6;
       gl_FragColor=vec4(c,1.0);
       #include <fog_fragment>
       #include <colorspace_fragment>
     }`});
 const vehicleGroup=new THREE.Group();scene.add(vehicleGroup);
+// A mover's pose, rewritten every frame: world x, y, z, the unit heading x, y, z and the yaw. A typed
+// array, because a store into a Vector3 field boxes a fresh number on every write (C13.4).
+const POSE_X=0,POSE_Y=1,POSE_Z=2,POSE_HX=3,POSE_HY=4,POSE_HZ=5,POSE_YAW=6;
+function newPose(){const p=new Float64Array(7);p[POSE_HZ]=1;return p;}
+// Fields that later hold fractions start as -0 (a double that reads as 0), so the engine never has to
+// widen a small-integer field while the per-frame loops run (each widening throws their optimised code away).
 const vehicleRnd=mulberry(4242),carState=[];
 { // Each road gets vehicles in proportion to its length (largest remainder); its district picks the
   // types. Roads take turns so no district drains a shared type first; a type left over after its
-  // districts fill spreads over the rest.
-  const budget={...VEHICLE_ALLOCATION},total=routes.reduce((s,r)=>s+r.length,0);
-  const exact=routes.map(r=>CARS*r.length/total),perRoute=exact.map(Math.floor);
+  // districts fill spreads over the rest. Vehicles start on the closed roads only; graph traffic (below)
+  // brings them onto the east rim road, the rim links and the bridges (C5.4).
+  const budget={...VEHICLE_ALLOCATION},total=routes.reduce((s,r)=>s+(r.open?0:r.length),0);
+  const exact=routes.map(r=>r.open?0:CARS*r.length/total),perRoute=exact.map(Math.floor);
   const spare=CARS-perRoute.reduce((a,b)=>a+b,0);
-  exact.map((x,i)=>[x-perRoute[i],i]).sort((a,b)=>b[0]-a[0]).slice(0,spare).forEach(([,i])=>{perRoute[i]++;});
+  exact.map((x,i)=>[x-perRoute[i],i]).filter(([,i])=>!routes[i].open).sort((a,b)=>b[0]-a[0]).slice(0,spare).forEach(([,i])=>{perRoute[i]++;});
   const cursor=routes.map(()=>0),rows=routes.map(()=>[]);
   for(let placed=0;placed<CARS;){
     for(let ri=0;ri<routes.length&&placed<CARS;ri++){
@@ -508,8 +518,8 @@ const vehicleRnd=mulberry(4242),carState=[];
       // A pulled-in taxi's outer side stops at the kerb: the Archive carriageway is 0.54 wide (0.10 lane plus
       // 0.095 plus a 0.075 half width reaches 0.27), a ring 0.88 (0.12 plus 0.22 plus 0.075 leaves 0.025).
       carState.push({type,route:ri,district:route.district,distance:(k+vehicleRnd()*.6)/list.length*route.length,dir:k%2?1:-1,speed,cruise:speed,target:speed,
-        lane:(archive?.1:.12)+(two?.04:0),pullBy:archive?.095:.22,half:VEHICLE_HALF[type],dodge:0,pull:0,mode:0,timer:type==='taxi'?1+vehicleRnd()*5:4+vehicleRnd()*12,goal:0,brake:0,on:true,
-        pos:new THREE.Vector3(),heading:new THREE.Vector3(),yaw:0,rank:0});
+        lane:(archive?.1:.12)+(two?.04:0),pullBy:archive?.095:.22,half:VEHICLE_HALF[type],dodge:-0,pull:-0,mode:0,timer:type==='taxi'?1+vehicleRnd()*5:4+vehicleRnd()*12,goal:-0,brake:0,on:true,
+        pose:newPose(),rank:0});
     });});
   // Stratified ranks: any prefix holds each type in proportion, so a tier keeps 60 % of each type.
   const keys=[];
@@ -548,62 +558,346 @@ const cars={types:vehicleMeshes,allocation:VEHICLE_ALLOCATION,tierCap:VEHICLE_TI
 // open venues on their own side of their own road.
 const venueStops=routes.map(()=>[]);
 for(const v of venueList){let best=null;
-  routes.forEach((route,ri)=>{if(route.district!==v.district)return;const pts=route.points;for(let i=0;i<pts.length;i++){const d=pts[i].distanceToSquared(v.face);if(!best||d<best.d)best={d,ri,i};}});
+  routes.forEach((route,ri)=>{if(route.district!==v.district||route.open)return;const pts=route.points;for(let i=0;i<pts.length;i++){const d=pts[i].distanceToSquared(v.face);if(!best||d<best.d)best={d,ri,i};}});
   if(!best||best.d>2.2)continue;
   const pts=routes[best.ri].points,a=pts[best.i],b=pts[(best.i+1)%pts.length],dx=b.x-a.x,dz=b.z-a.z,l=Math.hypot(dx,dz)||1;
   // A positive lane offset points along (dz, -dx), the same frame sampleRoute uses.
   const side=Math.sign((v.face.x-a.x)*dz/l-(v.face.z-a.z)*dx/l)||1;
   venueStops[best.ri].push({s:routes[best.ri].lengths[best.i],side,venue:v});
 }
-const carPoint=new THREE.Vector3(),carAhead=new THREE.Vector3();
-const STOP_LOOK=.9,STOP_DECEL=.9,CAR_ACCEL=.7,CAR_BRAKE=1.4;
+// ------------------------------------------------------------------ graph traffic (C5.4)
+// Every vehicle drives the road graph (roads.js trafficNet) instead of one road: at each junction it takes
+// a random exit, the exits toward its home district (the district of the road it was placed on) weighted
+// 70 %. It keeps to the right lane of the track it is on and slows when the vehicle ahead in its lane (on
+// this track, then on the next piece of its path) comes within 0.5 bumper to bumper. Where its next piece
+// joins another lane (a turn arc onto a ring or a bridge, a straight run past an arc's mouth) it merges:
+// it reads its place in that lane as if it were already there, follows whatever is ahead of that place
+// (vehicles in the lane and vehicles about to join it from another piece), and holds short of the merge
+// while a vehicle in the lane is within 0.5 bumper to bumper behind the joining point, so two vehicles
+// never meet at a merge. Taxis still pull to the
+// kerb at open venues on their own side of a street for 2 bars, and on the narrow Archive avenues traffic
+// behind a stopped taxi swings toward the centre line to pass (C5.3).
+// A path: track tk travelled in direction td (1 along the track, -1 against it), q the distance from the
+// track's start end along the travel, qEnd where this piece ends, mv the move taken at the end of the
+// current edge and onTurn whether the vehicle is on that move's turn arc. The per-frame loops write
+// positions only into typed arrays (the instance matrices and each mover's pose) and pass no number to a
+// function, so they allocate nothing (C13.4).
+const NET=trafficNet,TRACKS=NET?NET.tracks:[],NE=NET?NET.edgeCount:0,NIO=NET?NET.io:new Float64Array(8);
+const VEHICLE_HALF_LEN={compact:.15,sedan:.18,taxi:.18,suv:.18,van:.2,bus:.4,truck:.275,moto:.09,delivery:.09,chiva:.35};
+const STOP_LOOK=.9,STOP_DECEL=.9,STOP_ROOM=2,CAR_ACCEL=.7,CAR_BRAKE=1.4,CAR_BRAKE_HARD=4,FOLLOW_GAP=.5,TURN_SPEED=.9;
+function enterEdge(c,m){
+  c.onTurn=false;c.eager=false;c.tk=NET.mEdge[m];c.td=NET.mDir[m];c.q+=NET.mTrimIn[m];
+  const next=NET.pick(NET.mNext[m],c.home,c.cycle?(c.since>CYCLE_EAGER?2:1):0);c.mv=next;c.qEnd=TRACKS[c.tk].length-NET.mTrimOut[next];
+}
+// Past the end of a piece: onto the move's turn arc, or onto its out edge (which picks the next move).
+function advancePath(c){
+  for(let guard=0;guard<4&&c.q>=c.qEnd;guard++){
+    c.fromKey=laneKey(c.tk,c.td);c.exitQ=c.qEnd;c.q-=c.qEnd;c.gone=c.q;c.held=0;const m=c.mv;
+    if(!c.onTurn&&NET.mTurn[m]>=0){c.onTurn=true;c.tk=NE+NET.mTurn[m];c.td=NET.mTdir[m];c.qEnd=TRACKS[c.tk].length;}
+    else enterEdge(c,m);
+  }
+}
+// The piece after the current one: its track and direction in NEXT, its start distance in NEXT_Q.
+const NEXT=new Int32Array(2),NEXT_Q=new Float64Array(1);
+function nextPiece(c){const m=c.mv;
+  if(!c.onTurn&&NET.mTurn[m]>=0){NEXT[0]=NE+NET.mTurn[m];NEXT[1]=NET.mTdir[m];NEXT_Q[0]=0;}
+  else{NEXT[0]=NET.mEdge[m];NEXT[1]=NET.mDir[m];NEXT_Q[0]=NET.mTrimIn[m];}
+}
+// The world point NIO[0] along c's path (past qEnd it continues on the next piece) at c's lateral offset,
+// written to NIO[2..4].
+function pathPoint(c){
+  NIO[1]=c.lat;
+  if(NIO[0]<=c.qEnd){NET.at(c.tk,c.td);return;}
+  nextPiece(c);NIO[0]=NIO[0]-c.qEnd+NEXT_Q[0];NET.at(NEXT[0],NEXT[1]);
+}
+// Places c at its path point with its heading (the point 0.2 ahead, so it turns smoothly and pitches on a
+// ramp) into its instance matrix; keeps the pose (c.pose) for the chiva riders and the cycle trails.
+function placeOnPath(c,arr,o){
+  const P=c.pose;
+  NIO[0]=c.q;pathPoint(c);const px=NIO[2],py=NIO[3],pz=NIO[4];
+  NIO[0]=c.q+.2;pathPoint(c);let hx=NIO[2]-px,hy=NIO[3]-py,hz=NIO[4]-pz;const hl=Math.sqrt(hx*hx+hy*hy+hz*hz);
+  if(hl>1e-6){hx/=hl;hy/=hl;hz/=hl;}else{hx=P[POSE_HX];hy=P[POSE_HY];hz=P[POSE_HZ];}
+  P[POSE_X]=px;P[POSE_Y]=py;P[POSE_Z]=pz;P[POSE_HX]=hx;P[POSE_HY]=hy;P[POSE_HZ]=hz;P[POSE_YAW]=Math.atan2(hx,hz);
+  const lh=Math.sqrt(hx*hx+hz*hz)||1;
+  arr[o]=hz/lh;arr[o+1]=0;arr[o+2]=-hx/lh;arr[o+3]=0;arr[o+4]=-hx*hy/lh;arr[o+5]=lh;arr[o+6]=-hy*hz/lh;arr[o+7]=0;
+  arr[o+8]=hx;arr[o+9]=hy;arr[o+10]=hz;arr[o+11]=0;arr[o+12]=px;arr[o+13]=py+.006;arr[o+14]=pz;arr[o+15]=1;
+}
+// Start paths where V3 placed each vehicle: the edge of its road that holds its distance, its direction
+// along the road, and the move at that edge's end (a straight one when it already stands past a turn's
+// tangency point).
+if(NET)for(const c of carState){
+  c.home=NET.districtCode[c.district];c.cycle=false;c.halfLen=VEHICLE_HALF_LEN[c.type];c.two=c.type==='moto'||c.type==='delivery';
+  c.lat=c.lane;c.tk=-1;c.td=c.dir;c.q=-0;c.qEnd=-0;c.mv=0;c.onTurn=false;c.eager=false;c.held=-0;c.fromKey=-1;c.exitQ=-0;c.gone=9.5;
+  const L=routes[c.route].length,d=((c.distance%L)+L)%L;
+  for(let k=0;k<NE;k++){const t=TRACKS[k];if(t.route!==c.route)continue;const u=((d-t.s0)%L+L)%L;
+    if(u<t.length){c.tk=k;c.q=c.dir>0?u:t.length-u;break;}}
+  if(c.tk<0)continue;
+  const state=c.tk*2+(c.td>0?1:0);let mv=NET.pick(state,c.home,0);
+  if(c.q>=TRACKS[c.tk].length-NET.mTrimOut[mv]-.05)for(let i=0;i<NET.count[state];i++){const m=NET.start[state]+i;if(NET.mTurn[m]<0){mv=m;break;}}
+  c.mv=mv;c.qEnd=TRACKS[c.tk].length-NET.mTrimOut[mv];
+}
+// Lanes: the vehicles on each track and direction, rebuilt every frame by counting (no allocation). A
+// second table lists, per lane, the vehicles that left it less than DIVERGE ago: a fork or a turn arc
+// leaves a lane tangentially, so for that first stretch they still share its room (c.exitQ is where a
+// vehicle left its last lane, c.fromKey, and c.gone how far it has driven since).
+const DIVERGE=1;
+const LANES=Math.max(1,TRACKS.length*2),laneStart=new Int32Array(LANES+1),laneFill=new Int32Array(LANES),laneCars=new Int32Array(CARS);
+const fromStart=new Int32Array(LANES+1),fromFill=new Int32Array(LANES),fromCars=new Int32Array(CARS);
+function laneKey(tk,td){return tk*2+(td>0?0:1);}
+function buildLanes(){
+  laneStart.fill(0);fromStart.fill(0);
+  for(let k=0;k<carState.length;k++){const c=carState[k];if(!c.on||c.tk<0)continue;laneStart[laneKey(c.tk,c.td)+1]++;if(c.fromKey>=0&&c.gone<DIVERGE)fromStart[c.fromKey+1]++;}
+  for(let i=0;i<LANES;i++){laneStart[i+1]+=laneStart[i];laneFill[i]=laneStart[i];fromStart[i+1]+=fromStart[i];fromFill[i]=fromStart[i];}
+  for(let k=0;k<carState.length;k++){const c=carState[k];if(!c.on||c.tk<0)continue;laneCars[laneFill[laneKey(c.tk,c.td)]++]=k;if(c.fromKey>=0&&c.gone<DIVERGE)fromCars[fromFill[c.fromKey]++]=k;}
+}
+// Vehicles within MERGE_LOOK of the end of their piece, with the lane their next piece joins (key), their
+// place in that lane were they already in it (x: where they join it minus what is left of their piece) and
+// whether they are past their stop line (go): rebuilt every frame into typed arrays. A turn arc or a fork
+// branch meets its lane tangentially, so its last MERGE_STOP already shares the lane's room: a vehicle
+// holds short of that stretch while the lane is busy, and once past it the lane gives way to it.
+const MERGE_LOOK=2,MERGE_STOP=.7,MERGE_HOLD=4;
+const mergeCar=new Int32Array(CARS),mergeKey=new Int32Array(CARS),mergeX=new Float64Array(CARS),mergeGo=new Uint8Array(CARS);
+let mergeCount=0;
+function buildMerges(){
+  mergeCount=0;
+  for(let k=0;k<carState.length;k++){const c=carState[k];if(!c.on||c.tk<0||c.pull>.35)continue;const left=c.qEnd-c.q;if(left>=MERGE_LOOK)continue;
+    nextPiece(c);const n=mergeCount++;mergeCar[n]=k;mergeKey[n]=laneKey(NEXT[0],NEXT[1]);mergeX[n]=NEXT_Q[0]-left;mergeGo[n]=left-c.halfLen<MERGE_STOP?1:0;}
+}
+// The nearest vehicle ahead of car k, as a bumper gap in LEAD[0] (Infinity when none) and a speed in
+// LEAD[1]; LEAD[2] is 1 when the limit is a hold short of a merge. Ahead means: in its lane (a pulled-in
+// taxi is out of the lane); having left that lane less than DIVERGE ago (at its place in the lane: where
+// it left plus how far it has gone since); past its stop line and joining this lane ahead of car k; while
+// car k itself has just left a lane, the same in that lane; and near the end of car k's piece, at or
+// beyond car k's place x in the lane it joins, or joining that lane ahead of x from another piece. A
+// vehicle in the joined lane behind x but within 0.5 bumper to bumper of the stop line's reach holds car
+// k at its stop line, only while car k can still stop there and for at most MERGE_HOLD seconds, so no
+// queue can lock. Ties go to the lower index. The running best lives in LEAD itself, so no number is
+// boxed while the candidates are compared (C13.4).
+const LEAD=new Float64Array(3);
+// A taxi at the kerb pulls out only when no vehicle in its lane is alongside it or within 0.5 plus a
+// little of its rear bumper (traffic behind passes it first, C5.3).
+function laneClearBehind(k,c){const key=laneKey(c.tk,c.td);
+  for(let i=laneStart[key];i<laneStart[key+1];i++){const j=laneCars[i];if(j===k)continue;const o=carState[j];if(o.pull>.35)continue;
+    const dq=c.q-o.q,h=c.halfLen+o.halfLen;if(dq>-h&&dq<h+FOLLOW_GAP+.4)return false;}
+  return true;
+}
+function leaderOf(k,c){
+  const key=laneKey(c.tk,c.td);LEAD[0]=Infinity;LEAD[1]=0;LEAD[2]=0;
+  for(let i=laneStart[key];i<laneStart[key+1];i++){const j=laneCars[i];if(j===k)continue;const o=carState[j];if(o.pull>.35)continue;
+    const dq=o.q-c.q;if(dq<0||(dq===0&&j<k))continue;const g=dq-c.halfLen-o.halfLen;if(g<LEAD[0]){LEAD[0]=g;LEAD[1]=o.speed;LEAD[2]=0;}}
+  for(let i=fromStart[key];i<fromStart[key+1];i++){const j=fromCars[i];if(j===k)continue;const o=carState[j];
+    const p=o.exitQ+o.gone;if(p<c.q||(p===c.q&&j<k))continue;const g=p-c.q-c.halfLen-o.halfLen;if(g<LEAD[0]){LEAD[0]=g;LEAD[1]=o.speed;LEAD[2]=0;}}
+  for(let n=0;n<mergeCount;n++){if(!mergeGo[n]||mergeKey[n]!==key)continue;const j=mergeCar[n];if(j===k)continue;const o=carState[j];
+    if(o.tk===c.tk&&o.td===c.td)continue;const xo=mergeX[n];if(xo<c.q||(xo===c.q&&j<k))continue;const g=xo-c.q-c.halfLen-o.halfLen;if(g<LEAD[0]){LEAD[0]=g;LEAD[1]=o.speed;LEAD[2]=0;}}
+  if(c.fromKey>=0&&c.gone<DIVERGE){const K=c.fromKey,p0=c.exitQ+c.gone;
+    for(let i=laneStart[K];i<laneStart[K+1];i++){const j=laneCars[i];if(j===k)continue;const o=carState[j];if(o.pull>.35||o.q<=p0)continue;
+      const g=o.q-p0-c.halfLen-o.halfLen;if(g<LEAD[0]){LEAD[0]=g;LEAD[1]=o.speed;LEAD[2]=0;}}
+    for(let i=fromStart[K];i<fromStart[K+1];i++){const j=fromCars[i];if(j===k)continue;const o=carState[j];
+      const p=o.exitQ+o.gone;if(p<p0||(p===p0&&j<k))continue;const g=p-p0-c.halfLen-o.halfLen;if(g<LEAD[0]){LEAD[0]=g;LEAD[1]=o.speed;LEAD[2]=0;}}}
+  const left=c.qEnd-c.q;
+  if(left<MERGE_LOOK){nextPiece(c);const key2=laneKey(NEXT[0],NEXT[1]),q0=NEXT_Q[0],x=q0-left,mayHold=left-c.halfLen>=MERGE_STOP-.02&&c.held<MERGE_HOLD;
+    for(let i=laneStart[key2];i<laneStart[key2+1];i++){const j=laneCars[i];if(j===k)continue;const o=carState[j];if(o.pull>.35)continue;
+      if(o.q>=x){const g=o.q-x-c.halfLen-o.halfLen;if(g<LEAD[0]){LEAD[0]=g;LEAD[1]=o.speed;LEAD[2]=0;}}
+      else if(mayHold&&o.q>q0-MERGE_STOP-c.halfLen-o.halfLen-FOLLOW_GAP){const g=left-c.halfLen-MERGE_STOP;if(g<LEAD[0]){LEAD[0]=g;LEAD[1]=0;LEAD[2]=1;}}}
+    for(let n=0;n<mergeCount;n++){const j=mergeCar[n];if(j===k||mergeKey[n]!==key2)continue;const o=carState[j];
+      if(o.tk===c.tk&&o.td===c.td)continue;const xo=mergeX[n];if(xo<x||(xo===x&&j>k))continue;
+      const g=xo-x-c.halfLen-o.halfLen;if(g<LEAD[0]){LEAD[0]=g;LEAD[1]=o.speed;LEAD[2]=0;}}}
+}
 // On the narrow Archive avenues a stopped taxi fills the kerb half of its lane, so traffic behind it
 // swings toward the centre line to pass (C5.3). Stopped taxis are listed per road without allocating.
 const BLOCK_MAX=32,blockS=routes.map(()=>new Float32Array(BLOCK_MAX)),blockDir=routes.map(()=>new Int8Array(BLOCK_MAX)),blockCar=routes.map(()=>new Int16Array(BLOCK_MAX)),blockCount=new Int16Array(routes.length);
 const vehicleList=Object.values(vehicleMeshes);
 function updateCars(dt){
+  if(!NET)return;
   const bar=beat.barSeconds;
   blockCount.fill(0);
-  for(let k=0;k<carState.length;k++){const c=carState[k];if(c.type!=='taxi'||!c.on||c.pull<.35)continue;const r=c.route;
-    if(routes[r].district!=='episodic'||blockCount[r]>=BLOCK_MAX)continue;const n=blockCount[r]++,L=routes[r].length;
-    blockS[r][n]=((c.distance%L)+L)%L;blockDir[r][n]=c.dir;blockCar[r][n]=k;}
+  for(let k=0;k<carState.length;k++){const c=carState[k];if(c.type!=='taxi'||!c.on||c.pull<.35||c.route<0)continue;const r=c.route;
+    if(routes[r].district!=='episodic'||blockCount[r]>=BLOCK_MAX)continue;const n=blockCount[r]++;
+    blockS[r][n]=c.distance;blockDir[r][n]=c.td;blockCar[r][n]=k;}
+  buildLanes();buildMerges();
   for(let k=0;k<carState.length;k++){
-    const c=carState[k],route=routes[c.route],arr=c.mesh.instanceMatrix.array,o=c.slot*16;
-    if(c.rank>=visibleVehicles){if(c.on){for(let j=0;j<16;j++)arr[o+j]=0;c.on=false;c.mode=0;c.pull=0;c.speed=c.cruise;}continue;}
+    const c=carState[k],arr=c.mesh.instanceMatrix.array,o=c.slot*16;
+    if(c.rank>=visibleVehicles||c.tk<0){if(c.on){for(let j=0;j<16;j++)arr[o+j]=0;c.on=false;c.mode=0;c.pull=0;c.speed=c.cruise;}continue;}
     c.on=true;c.timer-=dt;
+    let track=TRACKS[c.tk],routed=track.total>0,rs=0,L=track.total;
+    if(routed){rs=track.s0+(c.td>0?c.q:track.length-c.q);rs=((rs%L)+L)%L;}
     let target=c.cruise;
     if(c.mode===0){
       if(c.timer<=0&&c.type==='taxi'){
-        const s=((c.distance%route.length)+route.length)%route.length,stops=venueStops[c.route];
-        for(let i=0;i<stops.length;i++){const stop=stops[i];if(stop.side!==-c.dir||stop.venue.state!=='open')continue;
-          const ahead=(((stop.s-s)*c.dir)%route.length+route.length)%route.length;
-          if(ahead>.3&&ahead<STOP_LOOK){c.mode=1;c.goal=c.distance+ahead*c.dir;break;}}
+        if(routed){const stops=venueStops[track.route];
+          for(let i=0;i<stops.length;i++){const stop=stops[i];if(stop.side!==-c.td||stop.venue.state!=='open')continue;
+            const ahead=(((stop.s-rs)*c.td)%L+L)%L;
+            if(ahead>.3&&ahead<STOP_LOOK&&c.q+ahead<c.qEnd-STOP_ROOM){c.mode=1;c.goal=c.q+ahead;break;}}}
         if(c.mode===0)c.timer=.25;
       } else if(c.timer<=0&&c.type!=='chiva'){c.mode=4;c.timer=.8+vehicleRnd()*1.4;c.target=c.cruise*(.3+.3*vehicleRnd());}
     }
-    if(c.mode===1){const left=(c.goal-c.distance)*c.dir;target=Math.min(c.cruise,Math.sqrt(2*STOP_DECEL*Math.max(0,left)));c.pull=Math.min(1,Math.max(c.pull,1-left/STOP_LOOK));
+    if(c.mode===1){const left=c.goal-c.q;target=Math.min(c.cruise,Math.sqrt(2*STOP_DECEL*Math.max(0,left)));c.pull=Math.min(1,Math.max(c.pull,1-left/STOP_LOOK));
       if(left<=.015||(c.speed<.03&&left<.06)){c.mode=2;c.timer=2*bar;c.speed=0;target=0;}}
-    else if(c.mode===2){target=0;c.pull=1;if(c.timer<=0)c.mode=3;}
-    else if(c.mode===3){c.pull=Math.max(0,1-c.speed/c.cruise);if(c.speed>=c.cruise*.98){c.mode=0;c.pull=0;c.timer=12+vehicleRnd()*8;}}
+    else if(c.mode===2){target=0;c.pull=1;if(c.timer<=0){if(laneClearBehind(k,c))c.mode=3;else c.timer=.25;}}
+    else if(c.mode===3){c.pull=Math.max(0,Math.min(c.pull-dt*.5,1-c.speed/c.cruise));if(c.speed>=c.cruise*.98||c.pull<=0){c.mode=0;c.pull=0;c.timer=12+vehicleRnd()*8;}}
     else if(c.mode===4){target=c.target;if(c.timer<=0){c.mode=0;c.timer=6+vehicleRnd()*10;}}
-    c.speed=c.speed<target?Math.min(target,c.speed+CAR_ACCEL*dt):Math.max(target,c.speed-CAR_BRAKE*dt);
+    if(c.onTurn&&target>TURN_SPEED)target=TURN_SPEED;
+    leaderOf(k,c);const follow=LEAD[0]<FOLLOW_GAP;
+    if(follow){const f=LEAD[1]+(LEAD[0]-.2)*2;target=Math.min(target,f>0?f:0);if(LEAD[2])c.held+=dt;}
+    c.speed=c.speed<target?Math.min(target,c.speed+CAR_ACCEL*dt):Math.max(target,c.speed-(follow?CAR_BRAKE_HARD:CAR_BRAKE)*dt);
     c.brake=c.mode===2||c.speed>target+.01?1:0;
-    c.distance+=dt*c.speed*c.dir;
+    c.q+=dt*c.speed;c.gone+=dt*c.speed;
+    if(c.q>=c.qEnd){advancePath(c);track=TRACKS[c.tk];routed=track.total>0;L=track.total;}
+    c.dir=c.td;
+    if(routed){rs=track.s0+(c.td>0?c.q:track.length-c.q);rs=((rs%L)+L)%L;c.route=track.route;c.distance=rs;}else c.route=-1;
     let pass=0;
-    if(blockCount[c.route]&&c.pull<.05){const L=route.length,s=((c.distance%L)+L)%L,n=blockCount[c.route];
-      for(let i=0;i<n;i++){if(blockDir[c.route][i]!==c.dir||blockCar[c.route][i]===k)continue;
-        const ahead=(((blockS[c.route][i]-s)*c.dir)%L+L)%L;if(ahead<.95||ahead>L-.5){pass=1;break;}}}
+    if(routed&&blockCount[c.route]&&c.pull<.05){const r=c.route,n=blockCount[r];
+      for(let i=0;i<n;i++){if(blockDir[r][i]!==c.td||blockCar[r][i]===k)continue;
+        const ahead=(((blockS[r][i]-rs)*c.td)%L+L)%L;if(ahead<.95||ahead>L-.5){pass=1;break;}}}
     c.dodge+=Math.sign(pass-c.dodge)*Math.min(Math.abs(pass-c.dodge),dt*2.2);
-    const lateral=c.lane+c.pull*c.pullBy-c.dodge*(c.lane-Math.min(c.lane,.11-c.half)),lane=-lateral*c.dir;
-    sampleRoute(route,c.distance,carPoint,lane);sampleRoute(route,c.distance+.2*c.dir,carAhead,lane);
-    c.pos.copy(carPoint);c.heading.subVectors(carAhead,carPoint).normalize();c.yaw=Math.atan2(c.heading.x,c.heading.z);
-    const cy=Math.cos(c.yaw),sy=Math.sin(c.yaw);
-    arr[o]=cy;arr[o+1]=0;arr[o+2]=-sy;arr[o+3]=0;arr[o+4]=0;arr[o+5]=1;arr[o+6]=0;arr[o+7]=0;arr[o+8]=sy;arr[o+9]=0;arr[o+10]=cy;arr[o+11]=0;
-    arr[o+12]=carPoint.x;arr[o+13]=carPoint.y+.006;arr[o+14]=carPoint.z;arr[o+15]=1;
+    // The lane: 0.10 on a narrow carriageway (the Archive avenues and links), 0.12 on a ring, rim road or
+    // bridge, 0.04 further out for two-wheelers; a pulled-in taxi's outer side stops at the kerb (0.095
+    // further on a narrow street, 0.22 on a wide one), inside the carriageway. The offset eases between
+    // tracks of different widths.
+    c.lane=track.lane+(c.two?.04:0);c.pullBy=track.half<.35?.095:.22;
+    const want=c.lane+c.pull*c.pullBy-c.dodge*(c.lane-Math.min(c.lane,.11-c.half)),ease=dt*.6;
+    c.lat+=Math.max(-ease,Math.min(ease,want-c.lat));
+    if(c.pull>0||c.dodge>0)c.lat=want;
+    placeOnPath(c,arr,o);
     c.mesh.geometry.attributes.aBrake.array[c.slot]=c.brake;
   }
   for(let i=0;i<vehicleList.length;i++){const mesh=vehicleList[i];mesh.instanceMatrix.needsUpdate=true;mesh.geometry.attributes.aBrake.needsUpdate=true;}
+  buildLanes();
+  updateCycles(dt);
 }
+
+// ------------------------------------------------------------------ NPC light cycles (C7.6)
+// One rider from each of the twelve districts cruises the bridge network: at a junction a bridge exit gets
+// 75 %, and between bridges they take the ring roads toward the nearest junction with a bridge exit. After
+// 6 s off the bridges a rider takes the bridge exit of the junction ahead (re-chosen while it can still
+// turn there, not only when it entered the edge). They ride the right lane at 2.2 to 2.8 units/s (1.8 on a small ring or a
+// narrow street, 1.5 through a turn) and overtake traffic on the centre line (a lane
+// split) while a vehicle is in their lane from 0.45 behind to 1.2 ahead. Each leaves a light trail, a low
+// wall 5.46 long in its home district's colour with a bright foot, fading behind it: a sample every 0.14
+// of travel, placed where the rider passed that mark during the frame, so the wall keeps its length at any
+// frame rate. Tier 3 shows 12, Tier 2 7 (60 %, C13.1), Tier 1 4. The
+// trail is steady light (no music reaches it); reduced motion freezes the riders like every vehicle.
+// The mesh comes from one small factory: the player's bike (C7.2) may replace it.
+const CYCLE_TIER={3:12,2:7,1:4},CYCLE_COUNT=12,CYCLE_EAGER=6,TRAIL=40,TRAIL_STEP=.14;
+function lightCycleGeometry(){
+  // Parts (vehicleMat): 0 body, 2 trim, 3 visor, 5 headlight, 6 taillight, 8 tyre, 9 glow in the trim colour.
+  const g=new GB();
+  for(const z of [-.1,.1]){g.box(-.008,0,z-.032,.008,.064,z+.032,9);g.box(-.009,.012,z-.02,.009,.052,z+.02,8);}
+  g.box(-.016,.024,-.12,.016,.05,.12,0);g.box(-.017,.038,-.11,.017,.042,.11,9);
+  g.box(-.014,.05,-.06,.014,.072,.04,0);g.box(-.015,.058,-.05,.015,.06,.03,9);g.box(-.011,.062,.04,.011,.08,.07,3);
+  g.box(-.03,.05,.07,.03,.056,.078,2);g.box(-.008,.03,.132,.008,.042,.15,5);g.box(-.009,.03,-.15,.009,.04,-.132,6);
+  return g.geometry();
+}
+const cycleRnd=mulberry(7717),cycles=[];
+if(NET)Object.keys(DATA.plateaus).slice(0,CYCLE_COUNT).forEach((d,i)=>{
+  // Each starts on a bridge of its home district, leaving home.
+  const own=[];for(let k=0;k<NE;k++){const t=TRACKS[k];if(t.kind==='bridge'&&(t.from===d||t.to===d))own.push(k);}
+  if(!own.length)return;
+  const tk=own[Math.floor(cycleRnd()*own.length)],t=TRACKS[tk],cruise=2.2+.6*cycleRnd();
+  const c={index:i,district:d,home:NET.districtCode[d],cycle:true,tk,td:t.from===d?1:-1,q:t.length*(.25+.5*cycleRnd()),qEnd:-0,mv:0,onTurn:false,
+    cruise,speed:cruise,lat:t.lane,halfLen:.15,on:false,passing:0,since:-0,eager:false,held:-0,fromKey:-1,exitQ:-0,gone:9.5,pose:newPose(),color:districtLight(d)};
+  const state=tk*2+(c.td>0?1:0);c.mv=NET.pick(state,c.home,1);c.qEnd=t.length-NET.mTrimOut[c.mv];
+  advancePath(c);cycles.push(c);
+});
+const cycleGeometry=lightCycleGeometry();
+cycleGeometry.setAttribute('aTrim',new THREE.InstancedBufferAttribute(new Float32Array(CYCLE_COUNT*3),3));
+cycleGeometry.setAttribute('aBrake',venueAttr(CYCLE_COUNT,1));
+const cycleMesh=new THREE.InstancedMesh(cycleGeometry,vehicleMat,CYCLE_COUNT);cycleMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);cycleMesh.frustumCulled=false;cycleMesh.name='light-cycles';
+for(let k=0;k<CYCLE_COUNT;k++){const c=cycles[k],t=c?c.color:new THREE.Color(1,1,1);cycleMesh.setColorAt(k,new THREE.Color('#0b0d12'));cycleGeometry.attributes.aTrim.setXYZ(k,t.r,t.g,t.b);}
+cycleMesh.instanceMatrix.array.fill(0);cycleMesh.instanceColor.needsUpdate=true;vehicleGroup.add(cycleMesh);
+// The trails: one mesh, a wall of TRAIL samples per rider from 0.012 to 0.09 above the road. Sample 0 is
+// the rider's rear wheel now, the rest the last samples taken every 0.14 of travel, newest first. The foot
+// is bright enough to bloom, so a rider's line reads from the overview.
+const trailVerts=CYCLE_COUNT*TRAIL*2,trailPos=new Float32Array(trailVerts*3),trailColor=new Float32Array(trailVerts*3),trailFade=new Float32Array(trailVerts),trailIndex=[];
+for(let k=0;k<CYCLE_COUNT;k++){const c=cycles[k],t=c?c.color:new THREE.Color(0,0,0);
+  for(let j=0;j<TRAIL;j++){const f=Math.pow(1-j/(TRAIL-1),1.2);
+    for(let v=0;v<2;v++){const i=(k*TRAIL+j)*2+v;trailColor[i*3]=t.r;trailColor[i*3+1]=t.g;trailColor[i*3+2]=t.b;trailFade[i]=f*(v?.7:1.8);}
+    if(j<TRAIL-1){const a=(k*TRAIL+j)*2;trailIndex.push(a,a+1,a+3,a,a+3,a+2);}}}
+const trailGeometry=new THREE.BufferGeometry();
+trailGeometry.setAttribute('position',new THREE.BufferAttribute(trailPos,3).setUsage(THREE.DynamicDrawUsage));
+trailGeometry.setAttribute('aColor',new THREE.BufferAttribute(trailColor,3));trailGeometry.setAttribute('aFade',new THREE.BufferAttribute(trailFade,1));
+trailGeometry.setIndex(trailIndex);
+// Additive light that fades into the fog (to black, not to the fog colour).
+const trailMat=new THREE.ShaderMaterial({transparent:true,depthWrite:false,blending:THREE.AdditiveBlending,side:THREE.DoubleSide,forceSinglePass:true,fog:true,
+  uniforms:THREE.UniformsUtils.merge([THREE.UniformsLib.fog]),
+  vertexShader:`attribute vec3 aColor;attribute float aFade;varying vec3 vColor;varying float vFade;
+    #include <fog_pars_vertex>
+    void main(){vColor=aColor;vFade=aFade;vec4 mvPosition=modelViewMatrix*vec4(position,1.0);gl_Position=projectionMatrix*mvPosition;
+      #include <fog_vertex>
+    }`,
+  fragmentShader:`varying vec3 vColor;varying float vFade;
+    #include <fog_pars_fragment>
+    void main(){vec3 c=vColor*vFade;
+      #ifdef USE_FOG
+        #ifdef FOG_EXP2
+          c*=exp(-fogDensity*fogDensity*vFogDepth*vFogDepth);
+        #else
+          c*=1.0-smoothstep(fogNear,fogFar,vFogDepth);
+        #endif
+      #endif
+      gl_FragColor=vec4(c,1.0);
+      #include <colorspace_fragment>
+    }`});
+const trailMesh=new THREE.Mesh(trailGeometry,trailMat);trailMesh.frustumCulled=false;trailMesh.name='light-cycle-trails';vehicleGroup.add(trailMesh);
+const trailX=new Float32Array(CYCLE_COUNT*TRAIL),trailY=new Float32Array(CYCLE_COUNT*TRAIL),trailZ=new Float32Array(CYCLE_COUNT*TRAIL),trailHead=new Int32Array(CYCLE_COUNT),trailRun=new Float64Array(CYCLE_COUNT);
+// The rear wheel at the previous frame, where this frame's samples are interpolated from.
+const trailPX=new Float64Array(CYCLE_COUNT),trailPY=new Float64Array(CYCLE_COUNT),trailPZ=new Float64Array(CYCLE_COUNT);
+// Writes rider k's trail vertices: sample 0 at its rear wheel, then the buffer newest first. A hidden
+// rider's trail collapses onto one point (nothing drawn).
+function writeTrail(k,c,collapse){
+  const P=c.pose,rx=P[POSE_X]-P[POSE_HX]*.13,ry=P[POSE_Y],rz=P[POSE_Z]-P[POSE_HZ]*.13,base=k*TRAIL;
+  for(let j=0;j<TRAIL;j++){let x=rx,y=ry,z=rz;
+    if(j>0&&!collapse){const s=base+(trailHead[k]-j+1+TRAIL)%TRAIL;x=trailX[s];y=trailY[s];z=trailZ[s];}
+    const i=(base+j)*6;trailPos[i]=x;trailPos[i+1]=collapse?y:y+.012;trailPos[i+2]=z;trailPos[i+3]=x;trailPos[i+4]=collapse?y:y+.09;trailPos[i+5]=z;}
+}
+function resetTrail(k,c){const P=c.pose,rx=P[POSE_X]-P[POSE_HX]*.13,ry=P[POSE_Y],rz=P[POSE_Z]-P[POSE_HZ]*.13;
+  for(let j=0;j<TRAIL;j++){const s=k*TRAIL+j;trailX[s]=rx;trailY[s]=ry;trailZ[s]=rz;}trailHead[k]=0;trailRun[k]=0;trailPX[k]=rx;trailPY[k]=ry;trailPZ[k]=rz;}
+// Adds the samples rider k's rear wheel passed this frame (one every TRAIL_STEP of its own travel, the
+// remainder carried to the next frame), each on the line from last frame's rear wheel to this one's; at
+// most TRAIL of them. The travel is the rear wheel's own move, so a lane split or the outside of a turn
+// cannot stretch the wall either.
+function advanceTrail(k,c){
+  const P=c.pose,rx=P[POSE_X]-P[POSE_HX]*.13,ry=P[POSE_Y],rz=P[POSE_Z]-P[POSE_HZ]*.13,ax=trailPX[k],ay=trailPY[k],az=trailPZ[k],r0=trailRun[k];
+  const step=Math.sqrt((rx-ax)*(rx-ax)+(ry-ay)*(ry-ay)+(rz-az)*(rz-az));
+  const total=Math.floor((r0+step)/TRAIL_STEP);
+  for(let n=Math.max(0,total-TRAIL);n<total;n++){const t=step>1e-9?Math.min(1,((n+1)*TRAIL_STEP-r0)/step):1,h=(trailHead[k]+1)%TRAIL,s=k*TRAIL+h;
+    trailHead[k]=h;trailX[s]=ax+(rx-ax)*t;trailY[s]=ay+(ry-ay)*t;trailZ[s]=az+(rz-az)*t;}
+  trailRun[k]=r0+step-total*TRAIL_STEP;trailPX[k]=rx;trailPY[k]=ry;trailPZ[k]=rz;
+}
+function updateCycles(dt){
+  if(!cycles.length)return;
+  const shown=vehicleGroup.visible?CYCLE_TIER[tier.current]||CYCLE_TIER[1]:0,arr=cycleMesh.instanceMatrix.array;
+  for(let k=0;k<cycles.length;k++){
+    const c=cycles[k],o=k*16;
+    if(k>=shown){if(c.on){for(let j=0;j<16;j++)arr[o+j]=0;c.on=false;writeTrail(k,c,true);}continue;}
+    const reveal=!c.on;c.on=true;
+    let track=TRACKS[c.tk],target=c.cruise;
+    if(c.onTurn)target=Math.min(target,1.5);else if(track.radius<5||track.half<.35)target=Math.min(target,1.8);
+    c.speed=c.speed<target?Math.min(target,c.speed+1.2*dt):Math.max(target,c.speed-3*dt);
+    c.q+=dt*c.speed;if(c.q>=c.qEnd){advancePath(c);track=TRACKS[c.tk];}
+    c.since=track.kind==='bridge'?0:c.since+dt;
+    // Six seconds off the bridges: take the junction ahead's bridge exit (once per edge), when it has one and
+    // the rider has not yet passed the point where that exit's turn leaves this edge.
+    if(!c.onTurn&&!c.eager&&c.since>CYCLE_EAGER&&!NET.mBridge[c.mv]){c.eager=true;const m=NET.pick(c.tk*2+(c.td>0?1:0),c.home,2),qe=track.length-NET.mTrimOut[m];
+      if(NET.mBridge[m]&&c.q<qe){c.mv=m;c.qEnd=qe;}}
+    // Overtaking: a vehicle in this lane from 0.45 behind to 1.2 ahead, on this track or the next piece.
+    let block=0;const key=laneKey(c.tk,c.td);
+    for(let i=laneStart[key];i<laneStart[key+1];i++){const v=carState[laneCars[i]];if(v.pull>.35)continue;const dq=v.q-c.q;
+      if(dq>-.45-v.halfLen&&dq<1.2+v.halfLen){block=1;break;}}
+    if(!block&&c.qEnd-c.q<1.2){nextPiece(c);const key2=laneKey(NEXT[0],NEXT[1]),reach=NEXT_Q[0]+1.2-(c.qEnd-c.q);
+      for(let i=laneStart[key2];i<laneStart[key2+1];i++){const v=carState[laneCars[i]];if(v.pull<=.35&&v.q>=NEXT_Q[0]-v.halfLen&&v.q<reach+v.halfLen){block=1;break;}}}
+    c.passing=block;
+    const want=block?-.01:track.lane,ease=dt*.8;c.lat+=Math.max(-ease,Math.min(ease,want-c.lat));
+    placeOnPath(c,arr,o);
+    if(reveal)resetTrail(k,c);
+    else advanceTrail(k,c);
+    writeTrail(k,c,false);
+  }
+  cycleMesh.instanceMatrix.needsUpdate=true;trailGeometry.attributes.position.needsUpdate=true;
+}
+cars.traffic=NET;
+cars.cycles={items:cycles,mesh:cycleMesh,trail:trailMesh,tier:CYCLE_TIER,trailSamples:TRAIL,trailLength:(TRAIL-1)*TRAIL_STEP,
+  get visible(){return vehicleGroup.visible?Math.min(cycles.length,CYCLE_TIER[tier.current]||CYCLE_TIER[1]):0;}};
 
 // ------------------------------------------------------------------ posters (C4.1 flat decals, C11.4 atlas)
 // One 1024 px atlas of twelve posters: the curated billboard lines of appendix G over abstract art, one
@@ -695,7 +989,7 @@ const venueExtras=[],venueRiderReserve={1:0,2:0,3:0};
   for(const {c,index} of chivas)for(let k=0;k<3;k++){const lz=-.2+k*.2,lx=k%2?.045:-.045,turn=k%2?1.3:-1.3;
     riders.push({pose:'ride',style:k%2?'handsup':'bounce',energy:.8,district:c.district,x:0,y:0,z:0,yaw:0,vehicle:index,free:true,extraRank:-1,
       gate:()=>vehicleGroup.visible&&c.on,
-      follow(p,out){const cy=Math.cos(c.yaw),sy=Math.sin(c.yaw);out.set(c.pos.x+cy*lx+sy*lz,c.pos.y+.241,c.pos.z-sy*lx+cy*lz);p.yawNow=c.yaw+turn;}});}
+      follow(p,out){const P=c.pose,cy=Math.cos(P[POSE_YAW]),sy=Math.sin(P[POSE_YAW]);out.set(P[POSE_X]+cy*lx+sy*lz,P[POSE_Y]+.241+lz*P[POSE_HY],P[POSE_Z]-sy*lx+cy*lz);p.yawNow=P[POSE_YAW]+turn;}});}
   for(const level of [1,2,3])venueRiderReserve[level]=3*chivas.filter(x=>x.c.rank<VEHICLE_TIER_CAP[level]).length;
   const carts=furnitureItems.filter(f=>f.kind==='cart').sort((a,b)=>(b.stage!==undefined)-(a.stage!==undefined)||a.index-b.index).slice(0,12);
   for(const f of carts){const back=new THREE.Vector3(Math.sin(f.yaw),0,Math.cos(f.yaw)),p=f.world.clone().addScaledVector(back,-.14);
@@ -786,7 +1080,7 @@ const venues={items:venueList,furniture:furnitureItems,byHost:venueByHost,of:ven
   names:VENUE_NAMES,graffiti:GRAFFITI_WORDS,posterLines:POSTER_LINES,atlases:{signs:signCanvases,tags:[tagCanvas],posters:[posterCanvas]},stops:venueStops,
   materials:{front:frontMat,signs:signMeshes.map(m=>m.material),vehicle:vehicleMat,posters:posterMat,furniture:furnitureMat},
   // Read-only handles for QA (C4.4 gate): the storefront, awning, sign and poster instance buffers.
-  meshes:{front:storefronts,awnings,signs:signMeshes,posters},
+  meshes:{front:storefronts,awnings,signs:signMeshes,posters,stageDecks:decks},
   stages:stages.map(s=>({district:s.district,name:s.name,kind:s.kind,x:s.center.x,z:s.center.z,up:s.center.y,r:s.r,capacity:s.capacity})),
   census(){const perDistrict={},count=s=>venueList.filter(v=>v.state===s).length;for(const v of venueList)perDistrict[v.district]=(perDistrict[v.district]||0)+1;
     return {total:venueList.length,perDistrict,open:count('open'),quiet:count('quiet'),shut:count('shut'),absent:count('absent'),

@@ -1079,6 +1079,940 @@ def verify_governor(engine, url):
     }""")
 
 
+def verify_design_v4(design_path=None):
+    """V4 design gates on data/city-design.json through qa_design.py (C6.7, the lake clearances, the
+    C4.1 re-flow with zero stage, venue and furniture overlaps): every gate becomes a check named
+    'design: <gate>'. Positive controls: python qa_design.py --control."""
+    import qa_design
+    page = json.loads(Path(design_path or ROOT / "data" / "city-design.json").read_text(encoding="utf-8"))
+    layout = json.loads((ROOT / "data" / "layout.json").read_text(encoding="utf-8"))
+    res = qa_design.run(qa_design.expand(page), layout, quiet=True)
+    report = {name: {"pass": ok, "measured": measured} for name, (ok, measured) in res.items()}
+    return report, {"design: " + name: ok for name, (ok, _) in res.items()}
+
+
+ROADS_PROBE = """([ref, turnRef, tamper]) => {
+  if (tamper) (0, eval)(tamper);
+  const v = window.__vc, r = v.roads;
+  if (!r) return {missing: true};
+  let tourMax = 0, turnMax = 0, surfaceMiss = 0, surfaceMax = 0;
+  const p = new v.camera.position.constructor();
+  for (const [k, x, y, z] of ref) {
+    r.tour.point(k, p);
+    tourMax = Math.max(tourMax, Math.hypot(p.x - x, -p.z - y, p.y - z));
+    const h = r.surfaceAtRoad(p.x, p.z, p.y);
+    if (h === null) surfaceMiss++; else surfaceMax = Math.max(surfaceMax, Math.abs(h - p.y));
+  }
+  for (const [k, count, pts] of turnRef) {
+    const t = r.graph.turns[k];
+    if (!t || t.points.length !== count) { turnMax = Infinity; continue; }
+    for (const [j, x, y, z] of pts) turnMax = Math.max(turnMax, Math.hypot(t.points[j][0] - x, t.points[j][1] - y, t.points[j][2] - z));
+  }
+  const districts = r.tour.entries.map(e => r.tour.sample(e.s + 0.05, {point: p.clone(), tangent: p.clone()}).district === e.district);
+  const rim = v.routes.find(q => q.kind === 'rim');
+  return {tourMax, turnMax, surfaceMiss, surfaceMax, samples: ref.length, tourLength: r.tour.length,
+    count: r.tour.count, turns: r.graph.turns.length, districtsOk: districts.every(Boolean),
+    rim: rim ? {open: rim.open, width: rim.width, clearance: rim.clearance, length: rim.length} : null};
+}"""
+
+
+def verify_roads(engine, tamper=None):
+    """V4a: viewer/roads.js rebuilds the page data exactly as qa_design.py does (tour polyline and turn
+    arcs, compared point by point), surfaceAtRoad finds the tour's road height, each tour entry samples
+    as its district, and the Archive east rim road is drawn as its own open stretch at its own width and
+    clearance. tamper is JavaScript run first (the positive control)."""
+    import qa_design
+    page = json.loads((ROOT / "data" / "city-design.json").read_text(encoding="utf-8"))
+    full = qa_design.expand(page)
+    pts = full["tour"]["points"]
+    ref = [[k, *pts[k]] for k in range(0, len(pts), 3)]
+    turn_ref = [[k, len(t["points"]), [[j, *t["points"][j]] for j in range(len(t["points"]))]]
+                for k, t in enumerate(full["graph"]["turns"])]
+    closed = pts + pts[:1]
+    length = sum(math.dist(a[:2], b[:2]) for a, b in zip(closed, closed[1:]))
+    rim = next(r for r in page["routes"] if r.get("kind") == "rim")
+    own, total = [rim["points"][0]], 0.0
+    for a, b in zip(rim["points"], rim["points"][1:]):
+        total += math.dist(a, b)
+        if total > rim["shared"][0]["from"] + 1e-4:
+            break
+        own.append(b)
+    own_length = sum(math.dist(a, b) for a, b in zip(own, own[1:]))
+    got = engine.evaluate(ROADS_PROBE, [ref, turn_ref, tamper])
+    report = {**got, "pythonTourLength": length, "rimOwnLength": own_length}
+    if got.get("missing"):
+        return report, {name: False for name in ("roads.js rebuilds the tour and turn arcs from the page data",
+                                                  "surfaceAtRoad finds the tour's road height",
+                                                  "tour samples its entries' districts",
+                                                  "rim road drawn as its own open stretch")}
+    rim_row = got["rim"] or {}
+    checks = {
+        "roads.js rebuilds the tour and turn arcs from the page data":
+            got["tourMax"] < 1e-6 and got["turnMax"] < 1e-6 and got["count"] == len(pts) and
+            got["turns"] == len(full["graph"]["turns"]) and abs(got["tourLength"] - length) < 1e-6,
+        "surfaceAtRoad finds the tour's road height": got["surfaceMiss"] == 0 and got["surfaceMax"] <= 0.02,
+        "tour samples its entries' districts": got["districtsOk"],
+        "rim road drawn as its own open stretch":
+            rim_row.get("open") is True and rim_row.get("width") == rim["width"] and
+            rim_row.get("clearance") == rim["clearanceOwn"] and abs(rim_row.get("length", 0) - own_length) < 1e-6,
+    }
+    return report, checks
+
+
+BRIDGES_PROBE = r"""async ([tamper]) => {
+  const v = window.__vc, r = v.roads, hyp = Math.hypot, RAD = Math.PI / 180;
+  const frame = () => new Promise(res => requestAnimationFrame(() => requestAnimationFrame(res)));
+  const wait = ms => new Promise(res => setTimeout(res, ms));
+  if (!r || !r.deck || !r.rings) return {missing: true};
+  if (tamper) (0, eval)(tamper);
+  const out = {}, design = r.bridges, info = r.bridgeInfo, rings = r.rings;
+  // Segment grids over layout polylines [x, y, (z)]: near(x, y) lists the segments of every cell within 1.2.
+  function segGrid(list) {
+    const cells = new Map(), segs = [];
+    list.forEach((o, oi) => { const P = o.P, n = P.length, m = o.closed ? n : n - 1;
+      for (let k = 0; k < m; k++) { const a = P[k], b = P[(k + 1) % n], id = segs.length; segs.push({a, b, o, k});
+        for (let i = Math.floor((Math.min(a[0], b[0]) - 1.2) / 2); i <= Math.floor((Math.max(a[0], b[0]) + 1.2) / 2); i++)
+          for (let j = Math.floor((Math.min(a[1], b[1]) - 1.2) / 2); j <= Math.floor((Math.max(a[1], b[1]) + 1.2) / 2); j++) {
+            const c = i * 100000 + j; if (!cells.has(c)) cells.set(c, []); cells.get(c).push(id); } } });
+    return {segs, near: (x, y) => cells.get(Math.floor(x / 2) * 100000 + Math.floor(y / 2)) || []};
+  }
+  // Distance from (x, y) to one segment, with the parameter along it.
+  const D = {d: 0, t: 0};
+  function segDist(a, b, x, y) { const dx = b[0] - a[0], dy = b[1] - a[1], l2 = dx * dx + dy * dy, t = l2 ? Math.max(0, Math.min(1, ((x - a[0]) * dx + (y - a[1]) * dy) / l2)) : 0;
+    D.d = hyp(x - a[0] - dx * t, y - a[1] - dy * t); D.t = t; return D; }
+  const cumOf = P => { const c = [0]; for (let i = 1; i < P.length; i++) c.push(c[i - 1] + hyp(P[i][0] - P[i - 1][0], P[i][1] - P[i - 1][1])); return c; };
+  const inWedge = (f, x, y) => { const dx = x - f.cx, dy = y - f.cy; return {d: hyp(dx, dy), u: (((Math.atan2(dy, dx) / RAD - f.a0) % 360 + 540) % 360 - 180) / (f.a1 - f.a0)}; };
+  const ringGrid = segGrid(rings.map(q => ({P: q.points, closed: true, q})));
+  const bridgeGrid = segGrid(design.map((b, i) => ({P: b.points, closed: false, b, i, cum: cumOf(b.points)})));
+  const ends = [];
+  design.forEach((b, bi) => b.ends.forEach((e, k) => ends.push({b, bi, e, k})));
+
+  // ---- A: every new material links and runs (three.js reports a failed compile only through diagnostics).
+  const gl = v.renderer.getContext();
+  v.renderer.compile(v.scene, v.camera);
+  const mats = {deck: r.deck.material, links: r.links.material, rails: r.rails.material, pylons: r.pylons.material, cables: r.cables.material,
+    underglow: r.underglow.material, lamps: r.bridgeLamps.material, pools: r.lampPools.material};
+  out.programs = {};
+  for (const [k, m] of Object.entries(mats)) { const p = v.renderer.properties.get(m).currentProgram;
+    out.programs[k] = !p ? false : p.diagnostics ? p.diagnostics.runnable === true : gl.getProgramParameter(p.program, gl.LINK_STATUS) === true; }
+  out.polygonOffset = r.deck.material.polygonOffset === true && r.deck.material.polygonOffsetUnits < 0 && r.deck.material.polygonOffsetFactor <= 0;
+
+  // ---- B: every junction is paved without a gap. The paved union around each bridge end (the ring's road and
+  // sidewalks, the stub out to just past the fillet tangency, the two fillet corners out to the curb's outer
+  // edge) is sampled every 0.04; each sample needs a drawn triangle (the deck mesh or a street ribbon) over it
+  // at its height.
+  const streetGroup = r.lampPools.parent, tris = [], tgrid = new Map(), TC = .5;
+  const side3 = (ax, ay, bx, by, px, py) => (bx - ax) * (py - ay) - (by - ay) * (px - ax);
+  const linkBoxes = (r.streets || []).map(st => { const xs = st.points.map(q => q[0]), ys = st.points.map(q => q[1]); return [Math.min(...xs) - 1, Math.min(...ys) - 1, Math.max(...xs) + 1, Math.max(...ys) + 1]; });
+  const nearEnd = (x, y) => ends.some(q => hyp(x - q.e.x, y - q.e.y) < 3.6) || linkBoxes.some(b => x > b[0] && x < b[2] && y > b[1] && y < b[3]);
+  function addMesh(mesh) {
+    mesh.updateMatrixWorld(true);
+    const g = mesh.geometry, P = g.attributes.position.array, I = g.index ? g.index.array : null, n = I ? I.length : P.length / 3, M = mesh.matrixWorld.elements;
+    const Wp = i => [M[0] * P[i * 3] + M[4] * P[i * 3 + 1] + M[8] * P[i * 3 + 2] + M[12], M[1] * P[i * 3] + M[5] * P[i * 3 + 1] + M[9] * P[i * 3 + 2] + M[13], M[2] * P[i * 3] + M[6] * P[i * 3 + 1] + M[10] * P[i * 3 + 2] + M[14]];
+    for (let t = 0; t + 2 < n; t += 3) {
+      const a = Wp(I ? I[t] : t), b = Wp(I ? I[t + 1] : t + 1), c = Wp(I ? I[t + 2] : t + 2);
+      const tri = [a[0], -a[2], b[0], -b[2], c[0], -c[2], (a[1] + b[1] + c[1]) / 3];
+      // A degenerate triangle covers nothing (it would pass every side test).
+      if (Math.abs(side3(tri[0], tri[1], tri[2], tri[3], tri[4], tri[5])) < 1e-10) continue;
+      if (!nearEnd(tri[0], tri[1]) && !nearEnd(tri[2], tri[3]) && !nearEnd(tri[4], tri[5])) continue;
+      const id = tris.length; tris.push(tri);
+      for (let i = Math.floor(Math.min(tri[0], tri[2], tri[4]) / TC); i <= Math.floor(Math.max(tri[0], tri[2], tri[4]) / TC); i++)
+        for (let j = Math.floor(Math.min(tri[1], tri[3], tri[5]) / TC); j <= Math.floor(Math.max(tri[1], tri[3], tri[5]) / TC); j++) {
+          const c2 = i * 100000 + j; if (!tgrid.has(c2)) tgrid.set(c2, []); tgrid.get(c2).push(id); }
+    }
+  }
+  addMesh(r.deck);
+  addMesh(r.links);
+  streetGroup.children.forEach(o => { if (o.isMesh && !o.isInstancedMesh && o.geometry.attributes.position) addMesh(o); });
+  function drawnAt(x, y, h) {
+    for (const id of tgrid.get(Math.floor(x / TC) * 100000 + Math.floor(y / TC)) || []) { const t = tris[id]; if (Math.abs(t[6] - h) > .06) continue;
+      const d1 = side3(t[0], t[1], t[2], t[3], x, y), d2 = side3(t[2], t[3], t[4], t[5], x, y), d3 = side3(t[4], t[5], t[0], t[1], x, y);
+      if (!((d1 < 0 || d2 < 0 || d3 < 0) && (d1 > 0 || d2 > 0 || d3 > 0))) return true; }
+    return false;
+  }
+  let gaps = 0, sampled = 0; const gapsBy = {};
+  for (const {b, bi, e, k} of ends) {
+    const P = b.points, n = P.length, a = k ? P[n - 1] : P[0], c = k ? P[n - 2] : P[1], l = hyp(c[0] - a[0], c[1] - a[1]), u = [(c[0] - a[0]) / l, (c[1] - a[1]) / l], t = [-u[1], u[0]];
+    const bs = k ? info[bi].bsB : info[bi].bsA, L = info[bi].length, ring = rings[e.route], cum = cumOf(P);
+    for (let al = -.7; al <= bs + .25; al += .04) for (let ac = -2.4; ac <= 2.4; ac += .04) {
+      const x = a[0] + u[0] * al + t[0] * ac, y = a[1] + u[1] * al + t[1] * ac;
+      let paved = false;
+      for (const id of ringGrid.near(x, y)) { const s = ringGrid.segs[id]; if (s.o.q === ring && segDist(s.a, s.b, x, y).d <= ring.half - .02) { paved = true; break; } }
+      if (!paved) for (let q = 0; q + 1 < n; q++) { const dd = segDist(P[q], P[q + 1], x, y); if (dd.d > .55) continue; const s = cum[q] + dd.t * (cum[q + 1] - cum[q]);
+        if ((k ? L - s : s) <= bs + .25) { paved = true; break; } }
+      if (!paved) for (const f of e.fillets) { const w = inWedge(f, x, y); if (w.u > .02 && w.u < .98 && w.d >= .79 && w.d <= 1.34) { paved = true; break; } }
+      if (!paved) continue;
+      sampled++;
+      if (!drawnAt(x, y, e.z)) { gaps++; const key = b.name + (k ? ' B' : ' A'); gapsBy[key] = (gapsBy[key] || 0) + 1; }
+    }
+  }
+  out.junctions = {sampled, gaps, gapsBy, triangles: tris.length};
+  // The six Archive rim links: their carriageway and both sidewalks drawn every 0.1 along their length.
+  let linkSamples = 0, linkGaps = 0;
+  for (const st of r.streets || []) { const P = st.points, cum = cumOf(P);
+    for (let s = 0, j = 0; s < cum[cum.length - 1]; s += .1) { while (cum[j + 1] < s) j++; const a = P[j], b = P[j + 1], ll = cum[j + 1] - cum[j], tt = (s - cum[j]) / ll;
+      for (const m of [-.33, 0, .33]) { const x = a[0] + (b[0] - a[0]) * tt - (b[1] - a[1]) / ll * m, y = a[1] + (b[1] - a[1]) * tt + (b[0] - a[0]) / ll * m;
+        linkSamples++; if (!drawnAt(x, y, st.z)) linkGaps++; } } }
+  out.links = {count: (r.streets || []).length, samples: linkSamples, gaps: linkGaps};
+
+  // ---- C: rails. Required every 0.1: the outer edge of every circular ring and of the rim road's own stretch
+  // (2 clear of its forks), both edges of every bridge span and every fillet curb. Open: a bridge mouth between
+  // its two fillet tangencies, a stage deck within 0.3, the pier's foot, the Reef shore within 1.7 of the lake.
+  // Forbidden, every 0.05 along every rail: any ring, rim road or bridge carriageway, a paved fillet corner, a
+  // stage deck.
+  const segs = [], rgrid = new Map();
+  for (const run of r.railRuns) for (let i = 0; i + 1 < run.points.length; i++) { const p = run.points[i], q = run.points[i + 1], id = segs.length; segs.push([p[0], p[1], q[0], q[1], p[2], q[2]]);
+    for (let x = Math.floor(Math.min(p[0], q[0]) - .1); x <= Math.floor(Math.max(p[0], q[0]) + .1); x++)
+      for (let y = Math.floor(Math.min(p[1], q[1]) - .1); y <= Math.floor(Math.max(p[1], q[1]) + .1); y++) { const c2 = x * 100000 + y; if (!rgrid.has(c2)) rgrid.set(c2, []); rgrid.get(c2).push(id); } }
+  const railed = (x, y, h) => { for (const id of rgrid.get(Math.floor(x) * 100000 + Math.floor(y)) || []) { const s = segs[id], dd = segDist([s[0], s[1]], [s[2], s[3]], x, y);
+      if (dd.d < .035 && Math.abs(s[4] + (s[5] - s[4]) * dd.t - h) < .06) return true; } return false; };
+  const lake = r.lake, decks = v.stages.filter(s => s.kind === 'deck');
+  const shoreGap = (x, y) => { let d = Infinity; const ca = Math.cos(lake.angle), sa = Math.sin(lake.angle);
+    for (let i = 0; i < 360; i++) { const tt = i / 360 * 2 * Math.PI, uu = Math.cos(tt) * lake.rx, vv = Math.sin(tt) * lake.ry; d = Math.min(d, hyp(x - lake.cx - uu * ca + vv * sa, y - lake.cy - uu * sa - vv * ca)); } return d; };
+  const openAt = (x, y, h, district) => {
+    for (const s of decks) if (Math.abs(s.z - h) < .3 && hyp(x - s.x, y - s.y) - s.r < .3) return true;
+    if (lake && lake.pier && hyp(x - lake.pier.x0, y - lake.pier.y0) < 1.0) return true;
+    return district === 'reef' && lake && shoreGap(x, y) < 1.7;
+  };
+  let required = 0, missing = 0; const missingBy = {};
+  const need = (x, y, h, label) => { required++; if (!railed(x, y, h)) { missing++; missingBy[label] = (missingBy[label] || 0) + 1; } };
+  for (const ring of rings) {
+    const mouths = ends.filter(q => q.e.route === ring.route).map(q => q.e.fillets.map(f => [f.cx + Math.cos(f.a0 * RAD) * f.r, f.cy + Math.sin(f.a0 * RAD) * f.r]));
+    if (ring.disc) {
+      const RR = ring.R + ring.half - .015, N = Math.ceil(2 * Math.PI * RR / .1);
+      const spans = mouths.map(m => { const a0 = Math.atan2(m[0][1] - ring.cy, m[0][0] - ring.cx), a1 = Math.atan2(m[1][1] - ring.cy, m[1][0] - ring.cx);
+        let lo = Math.min(a0, a1), hi = Math.max(a0, a1); if (hi - lo > Math.PI) [lo, hi] = [hi, lo + 2 * Math.PI]; return [lo, hi]; });
+      for (let i = 0; i < N; i++) { const a = i / N * 2 * Math.PI, x = ring.cx + Math.cos(a) * RR, y = ring.cy + Math.sin(a) * RR, m = .05 / RR;
+        if (spans.some(([lo, hi]) => [a, a + 2 * Math.PI, a - 2 * Math.PI].some(aa => aa > lo - m && aa < hi + m)) || openAt(x, y, ring.z, ring.district)) continue;
+        need(x, y, ring.z, ring.district + ' rim'); }
+    } else if (ring.own !== null) {
+      const P = ring.points, cum = cumOf(P);
+      const proj = p => { let best = Infinity, s = 0; for (let k = 0; k + 1 < P.length; k++) { const dd = segDist(P[k], P[k + 1], p[0], p[1]); if (dd.d < best) { best = dd.d; s = cum[k] + dd.t * (cum[k + 1] - cum[k]); } } return s; };
+      const spans = mouths.map(m => m.map(proj).sort((x1, x2) => x1 - x2));
+      for (let s = 2, j = 0; s < ring.own - 2; s += .1) { while (cum[j + 1] < s) j++; const a = P[j], b = P[j + 1], tt = (s - cum[j]) / (cum[j + 1] - cum[j]), ll = hyp(b[0] - a[0], b[1] - a[1]), o = ring.half - .015;
+        const x = a[0] + (b[0] - a[0]) * tt + (b[1] - a[1]) / ll * o, y = a[1] + (b[1] - a[1]) * tt - (b[0] - a[0]) / ll * o;
+        if (spans.some(([lo, hi]) => s > lo - .05 && s < hi + .05) || openAt(x, y, ring.z, ring.district)) continue;
+        need(x, y, ring.z, 'rim road'); }
+    }
+  }
+  // The Archive (a rounded rectangle with avenue loops and the rim road hanging over its rims): its plateau
+  // outline and every non-circular loop's outer edge, wherever no other surface at its height covers them.
+  const loops = rings.filter(q => !q.disc).map(q => ({q, g: segGrid([{P: q.points, closed: true}])}));
+  const inLoop = (x, y, h, skip) => loops.some(({q, g}) => { if (q === skip || Math.abs(q.z - h) > .25) return false;
+    let best = Infinity; for (const id of g.near(x, y)) { const s = g.segs[id]; best = Math.min(best, segDist(s.a, s.b, x, y).d); }
+    if (best < q.half - .03) return true;
+    let inside = false; const P = q.points; for (let i = 0, j = P.length - 1; i < P.length; j = i++) { const a = P[i], b = P[j]; if ((a[1] > y) !== (b[1] > y) && x < (b[0] - a[0]) * (y - a[1]) / (b[1] - a[1]) + a[0]) inside = !inside; }
+    return inside; });
+  const linkList = (r.streets || []).map(st => ({P: st.points, z: st.z, half: st.width / 2, walk: st.width / 2 + st.sidewalk}));
+  const linkDist = (k, x, y) => { let best = Infinity; for (let i = 0; i + 1 < k.P.length; i++) best = Math.min(best, segDist(k.P[i], k.P[i + 1], x, y).d); return best; };
+  const inLink = (x, y, h, skip) => linkList.some(k => k !== skip && Math.abs(k.z - h) < .25 && linkDist(k, x, y) < k.walk - .03);
+  const inMouth = (x, y, h) => ends.some(({b, e}) => { if (Math.abs(e.z - h) > .2) return false;
+    if (e.fillets.some(f => { const w = inWedge(f, x, y); return w.u > -.02 && w.u < 1.02 && w.d >= .7 && w.d <= 1.4; })) return true;
+    const P = b.points; for (let q = 0; q + 1 < P.length; q++) if (segDist(P[q], P[q + 1], x, y).d < .6 && hyp(x - e.x, y - e.y) < 1.6) return true; return false; });
+  for (const [d, p] of Object.entries(r.plateaus)) { if (p.shape === 'disc') continue;
+    const rr = 2.5, ax = p.rx - rr, ay = p.ry - rr, sdf = (x, y) => { const qx = Math.abs(x - p.cx) - ax, qy = Math.abs(y - p.cy) - ay; return hyp(Math.max(qx, 0), Math.max(qy, 0)) + Math.min(Math.max(qx, qy), 0) - rr; };
+    const N = Math.ceil(2 * Math.PI * hyp(p.rx, p.ry) / .1);
+    for (let i = 0; i < N; i++) { const a = i / N * 2 * Math.PI; let x = p.cx + Math.cos(a) * (p.rx + p.ry + 10), y = p.cy + Math.sin(a) * (p.rx + p.ry + 10);
+      // March inward from outside along the ray to the outline (inset 0.015).
+      let lo = 0, hi = 1; const ox = p.cx, oy = p.cy; for (let k = 0; k < 40; k++) { const m = (lo + hi) / 2; if (sdf(ox + (x - ox) * m, oy + (y - oy) * m) < -.015) lo = m; else hi = m; }
+      x = ox + (x - ox) * lo; y = oy + (y - oy) * lo;
+      if (inLoop(x, y, p.z, null) || inLink(x, y, p.z, null) || openAt(x, y, p.z, d) || inMouth(x, y, p.z)) continue;
+      need(x, y, p.z, d + ' plateau outline'); }
+    for (const {q} of loops) { const P = q.points, n = P.length, cum = cumOf(P.concat([P[0]])), total = cum[n], o = q.half - .015;
+      for (let s = 0, j = 0; s < total; s += .1) { while (cum[j + 1] < s) j++; const a = P[j], b = P[(j + 1) % n], ll = hyp(b[0] - a[0], b[1] - a[1]) || 1, tt = (s - cum[j]) / ll;
+        const x = a[0] + (b[0] - a[0]) * tt + (b[1] - a[1]) / ll * o, y = a[1] + (b[1] - a[1]) * tt - (b[0] - a[0]) / ll * o;
+        if (sdf(x, y) < -.03 || inLoop(x, y, q.z, q) || inLink(x, y, q.z, null) || openAt(x, y, q.z, d) || inMouth(x, y, q.z)) continue;
+        need(x, y, q.z, d + ' loop edge ' + q.route); } }
+    // The rim links' outer edges, where they run along the rim between two avenues.
+    for (const k of linkList) { const P = k.P, cum = cumOf(P), o = k.walk - .015;
+      for (const sd of [-1, 1]) for (let s = 0, j = 0; s < cum[cum.length - 1]; s += .1) { while (cum[j + 1] < s) j++; const a = P[j], b = P[j + 1], ll = cum[j + 1] - cum[j], tt = (s - cum[j]) / ll;
+        const x = a[0] + (b[0] - a[0]) * tt - (b[1] - a[1]) / ll * sd * o, y = a[1] + (b[1] - a[1]) * tt + (b[0] - a[0]) / ll * sd * o;
+        if (sdf(x, y) < -.03 || inLoop(x, y, k.z, null) || inLink(x, y, k.z, k) || openAt(x, y, k.z, d) || inMouth(x, y, k.z)) continue;
+        need(x, y, k.z, d + ' link edge'); } }
+  }
+  design.forEach((b, bi) => { const P = b.points, cum = cumOf(P), L = info[bi].length;
+    for (const sd of [-1, 1]) for (let s = info[bi].bsA + .1, j = 0; s < L - info[bi].bsB - .1; s += .1) { while (cum[j + 1] < s) j++;
+      const a = P[j], q = P[j + 1], ll = cum[j + 1] - cum[j], tt = (s - cum[j]) / ll, nx = -(q[1] - a[1]) / ll, ny = (q[0] - a[0]) / ll;
+      need(a[0] + (q[0] - a[0]) * tt + nx * sd * .555, a[1] + (q[1] - a[1]) * tt + ny * sd * .555, a[2] + (q[2] - a[2]) * tt, b.name + ' edge'); }
+    b.ends.forEach(e => e.fillets.forEach(f => { for (let u2 = .04; u2 < .96; u2 += .04) { const ang = (f.a0 + (f.a1 - f.a0) * u2) * RAD, x = f.cx + Math.cos(ang) * .785, y = f.cy + Math.sin(ang) * .785;
+      if (!openAt(x, y, e.z, e.district)) need(x, y, e.z, b.name + ' corner'); } })); });
+  let onRoad = 0, railPoints = 0; const onRoadBy = {};
+  for (const run of r.railRuns) for (let i = 0; i + 1 < run.points.length; i++) { const p = run.points[i], q = run.points[i + 1], nn = Math.max(1, Math.ceil(hyp(q[0] - p[0], q[1] - p[1]) / .05));
+    for (let j = 0; j < nn; j++) { const x = p[0] + (q[0] - p[0]) * j / nn, y = p[1] + (q[1] - p[1]) * j / nn, h = p[2] + (q[2] - p[2]) * j / nn; railPoints++;
+      let bad = '';
+      for (const id of ringGrid.near(x, y)) { const s = ringGrid.segs[id]; if (Math.abs(s.o.q.z - h) < .2 && segDist(s.a, s.b, x, y).d < s.o.q.roadHalf - .01) { bad = 'ring carriageway'; break; } }
+      if (!bad) for (const id of bridgeGrid.near(x, y)) { const s = bridgeGrid.segs[id], dd = segDist(s.a, s.b, x, y); if (dd.d < .43 && Math.abs(s.a[2] + (s.b[2] - s.a[2]) * dd.t - h) < .2) { bad = 'bridge carriageway'; break; } }
+      if (!bad) for (const {e} of ends) { if (Math.abs(e.z - h) > .2) continue; for (const f of e.fillets) { const w = inWedge(f, x, y); if (w.u > .02 && w.u < .98 && w.d > .91 && w.d < 1.34) bad = 'fillet corner'; } if (bad) break; }
+      if (!bad && linkList.some(k => Math.abs(k.z - h) < .2 && linkDist(k, x, y) < k.half - .01)) bad = 'link carriageway';
+      if (!bad) for (const s of decks) if (Math.abs(s.z - h) < .3 && hyp(x - s.x, y - s.y) < s.r - .05) { bad = 'stage deck'; break; }
+      if (bad) { onRoad++; onRoadBy[bad] = (onRoadBy[bad] || 0) + 1; } } }
+  const neonVertices = r.railRuns.reduce((acc, run) => acc + run.points.length * 6, 0);
+  out.rails = {runs: r.railRuns.length, required, missing, missingBy, railPoints, onRoad, onRoadBy, meshVertices: r.rails.geometry.attributes.position.count, neonVertices};
+
+  // ---- D: bridge walkers: a share at every tier, every walk path used at Tier 3, each path on a road surface
+  // (surfaceAtRoad within 0.03), no step over 0.35 and never inside a footprint.
+  const c = v.crowd, tiers = {};
+  for (const level of [3, 2, 1]) { c.applyTier(level); let n = 0; const used = new Set();
+    c.people.forEach((p, i) => { if (p.kind === 0 && p.path && c.isVisible(i, p)) { n++; used.add(p.path); } });
+    tiers[level] = {bridgeWalkers: n, paths: used.size}; }
+  c.applyTier(v.tier.current);
+  let pathGap = 0, surfaceMiss = 0, surfaceMax = 0, blocked = 0, pathPoints = 0;
+  for (const path of r.walkPaths) { const pts = path.points;
+    for (let i = 0; i < pts.length; i++) { const p = pts[i]; pathPoints++;
+      if (i) pathGap = Math.max(pathGap, pts[i - 1].distanceTo(p));
+      const h = r.surfaceAtRoad(p.x, p.z, p.y); if (h === null) surfaceMiss++; else surfaceMax = Math.max(surfaceMax, Math.abs(h - p.y));
+      const foot = p.clone(); foot.y += .18; if (v.pointBlocked(foot, .07, false)) blocked++; } }
+  const walkers = c.people.filter(p => p.kind === 0 && p.path);
+  out.walkers = {tiers, paths: r.walkPaths.length, pathGap, surfaceMiss, surfaceMax, blocked, pathPoints, total: walkers.length, styles: [...new Set(walkers.map(p => p.style))]};
+
+  // ---- E: packets through the limiter, sound off (source 0.5) in the overview (0.6).
+  const pk = r.packets, desc = Object.getOwnPropertyDescriptor(v.tier, 'current'), levels = {};
+  const settle = async () => { await wait(2300); await frame(); return pk.level; };
+  const before = pk.count;
+  for (const setting of ['Full', 'Soft', 'Calm']) { v.lights.setSetting(setting); levels[setting] = await settle(); }
+  v.lights.setSetting('Full'); await settle();
+  const tierSlots = {};
+  for (const level of [3, 2, 1]) { Object.defineProperty(v.tier, 'current', {get: () => level, configurable: true}); r.update(); tierSlots[level] = pk.slots; }
+  Object.defineProperty(v.tier, 'current', desc); r.update();
+  const dirOk = Object.entries(pk.table).every(([d, dir]) => design.every((b, i) => b.from === d ? dir[i] === 1 : b.to === d ? dir[i] === -1 : true));
+  out.packets = {levels, kicks: pk.count - before, tierSlots, dirOk, room: pk.room, sound: v.beat.sound};
+
+  // ---- F: bridge lamps (city-life.js's rule): on the left sidewalk of the from-to direction at 0.51 from the
+  // centreline, on the deck surface, and drawn where the data says.
+  let lampBad = 0; const arr = r.bridgeLamps.instanceMatrix.array;
+  r.bridgeLampSpots.forEach((s, k) => { const P = design[s.bridge].points, x = s.p.x, y = -s.p.z; let best = Infinity, sideSign = 0;
+    for (let q = 0; q + 1 < P.length; q++) { const dd = segDist(P[q], P[q + 1], x, y); if (dd.d < best) { best = dd.d; sideSign = side3(P[q][0], P[q][1], P[q + 1][0], P[q + 1][1], x, y) > 0 ? 1 : -1; } }
+    const h = r.surfaceAtRoad(s.p.x, s.p.z, s.p.y), drawn = hyp(arr[k * 16 + 12] - s.p.x, arr[k * 16 + 13] - s.p.y, arr[k * 16 + 14] - s.p.z) < 1e-4;
+    if (sideSign !== 1 || Math.abs(best - .51) > .012 || h === null || Math.abs(h - s.p.y) > .03 || !drawn) lampBad++; });
+  out.lamps = {count: r.bridgeLampSpots.length, drawn: r.bridgeLamps.count, bad: lampBad};
+
+  // ---- H (V4 fix, C11.3): a crosswalk at every junction, read from the drawn stripes (instance matrices:
+  // column 0 the stripe's width across the traffic, column 1 its length along it, column 3 its centre).
+  const cw = r.crosswalks, cwOut = {tees: 0, forks: 0, stripes: 0, bad: 0, badExamples: [], walkSamples: 0, walkUncovered: 0, uncoveredExamples: []};
+  if (cw) {
+    const CA = cw.mesh.instanceMatrix.array, shown = cw.mesh.count;
+    const stripe = i => { const o = i * 16, w = hyp(CA[o], CA[o + 2]), l = hyp(CA[o + 4], CA[o + 6]);
+      return {x: CA[o + 12], y: -CA[o + 14], h: CA[o + 13], w, len: l, ux: CA[o + 4] / (l || 1), uy: -CA[o + 6] / (l || 1), drawn: i < shown && w > 1e-3 && l > 1e-3}; };
+    const bad = (why, x) => { cwOut.bad++; if (cwOut.badExamples.length < 8) cwOut.badExamples.push(Object.assign({why}, x)); };
+    // A route's full centreline at arc length s (closed, as the fillets' ringS count it), right-hand normal.
+    const ringCum = new Map();
+    const ringAt = (ri, s) => { const P = rings[ri].points, n = P.length; if (!ringCum.has(ri)) { const c = [0]; for (let i = 1; i <= n; i++) c.push(c[i - 1] + hyp(P[i % n][0] - P[i - 1][0], P[i % n][1] - P[i - 1][1])); ringCum.set(ri, c); }
+      const cum = ringCum.get(ri), total = cum[n]; s = ((s % total) + total) % total; let lo = 0; while (lo + 1 < n && cum[lo + 1] <= s) lo++;
+      const a = P[lo], b = P[(lo + 1) % n], t = (s - cum[lo]) / ((cum[lo + 1] - cum[lo]) || 1e-9), l = hyp(b[0] - a[0], b[1] - a[1]) || 1;
+      return {x: a[0] + (b[0] - a[0]) * t, y: a[1] + (b[1] - a[1]) * t, nx: (b[1] - a[1]) / l, ny: -(b[0] - a[0]) / l}; };
+    // Distance to a road's centreline (a route's own stretch only, like the page draws it).
+    const ownPoints = ri => { const R = rings[ri], Q = R.points; if (R.own === null) return {P: Q, closed: true};
+      const out = [Q[0]]; let s = 0; for (let i = 1; i < Q.length; i++) { s += hyp(Q[i][0] - Q[i - 1][0], Q[i][1] - Q[i - 1][1]); if (s > R.own + 1e-4) break; out.push(Q[i]); } return {P: out, closed: false}; };
+    const owns = rings.map((R, ri) => ownPoints(ri));
+    const roadGap = (ri, x, y) => { const {P, closed} = owns[ri], n = P.length, m = closed ? n : n - 1; let best = Infinity;
+      for (let i = 0; i < m; i++) best = Math.min(best, segDist(P[i], P[(i + 1) % n], x, y).d); return best; };
+    const tees = cw.list.filter(q => q.kind === 'tee'), forks = cw.list.filter(q => q.kind === 'fork');
+    const teeEnds = new Set(tees.map(q => q.bridge + ':' + q.end)), forkEnds = new Set(forks.map(q => (q.branch === 'rim' ? 'r' + q.route : 's' + q.street) + ':' + q.end));
+    cwOut.tees = ends.every(({bi, k}) => teeEnds.has(bi + ':' + k)) ? tees.length : -tees.length;
+    const forkNeed = (r.streets || []).length * 2 + rings.filter(q => q.own !== null).length * 2;
+    cwOut.forks = forkEnds.size === forkNeed ? forks.length : -forks.length;
+    for (const q of tees) { const e = design[q.bridge].ends[q.end], ring = rings[e.route];
+      if (q.count < 4) bad('few stripes', {bridge: q.bridge, end: q.end});
+      const S = []; for (let i = q.first; i < q.first + q.count; i++) S.push(stripe(i));
+      for (const st of S) { cwOut.stripes++;
+        const off = roadGap(e.route, st.x, st.y), curb = Math.min(...e.fillets.map(f => hyp(st.x - f.cx, st.y - f.cy) - f.r));
+        const surf = r.surfaceAtRoad(st.x, -st.y, e.z);
+        if (!st.drawn || off < ring.roadHalf || curb < 0 || surf === null || Math.abs(surf - e.z) > .02 || Math.abs(st.h - e.z - .021) > .005)
+          bad('tee stripe', {bridge: q.bridge, end: q.end, off: +off.toFixed(3), curb: +curb.toFixed(3), surf}); }
+      // The ring walkers' line over the mouth: every sample on the mouth's asphalt (0.06 outside the fillet curbs) is under a stripe band.
+      const walk = ring.roadHalf + .04;
+      for (let s = q.lo; s <= q.hi; s += .05) { const p = ringAt(e.route, s), x = p.x + p.nx * walk, y = p.y + p.ny * walk;
+        if (Math.min(...e.fillets.map(f => hyp(x - f.cx, y - f.cy) - f.r)) < .06) continue;
+        cwOut.walkSamples++;
+        const under = S.some(st => st.drawn && Math.abs((x - st.x) * st.ux + (y - st.y) * st.uy) <= st.len / 2 + 1e-3 && Math.abs((x - st.x) * -st.uy + (y - st.y) * st.ux) <= cw.stripe.step / 2 + 1e-3);
+        if (!under) { cwOut.walkUncovered++; if (cwOut.uncoveredExamples.length < 6) cwOut.uncoveredExamples.push({bridge: q.bridge, end: q.end, s: +s.toFixed(2)}); } } }
+    for (const q of forks) { if (q.count < 4) bad('few stripes', {fork: q.street, end: q.end});
+      const P = q.branch === 'rim' ? owns[q.route].P : r.streets[q.street].points;
+      const lats = [];
+      for (let i = q.first; i < q.first + q.count; i++) { const st = stripe(i); cwOut.stripes++;
+        let best = Infinity, lat = 0; for (let k = 0; k + 1 < P.length; k++) { const dd = segDist(P[k], P[k + 1], st.x, st.y); if (dd.d < best) { best = dd.d;
+          lat = side3(P[k][0], P[k][1], P[k + 1][0], P[k + 1][1], st.x, st.y) > 0 ? dd.d : -dd.d; } }
+        lats.push(lat);
+        let other = Infinity; rings.forEach((R, ri) => { if (q.branch === 'rim' && ri === q.route) return; other = Math.min(other, roadGap(ri, st.x, st.y) - R.roadHalf - .13); });
+        const surf = r.surfaceAtRoad(st.x, -st.y, q.z);
+        if (!st.drawn || best > q.half - .02 || other < 0 || surf === null || Math.abs(surf - q.z) > .02 || Math.abs(st.h - q.z - .021) > .005)
+          bad('fork stripe', {branch: q.branch, street: q.street, end: q.end, centre: +best.toFixed(3), other: +other.toFixed(3)}); }
+      const span = Math.max(...lats) - Math.min(...lats) + cw.stripe.width;
+      if (span < 2 * q.half - .2) bad('fork span', {branch: q.branch, street: q.street, end: q.end, span: +span.toFixed(3)}); }
+  }
+  out.crosswalks = cwOut;
+
+  // ---- G: the draw calls and triangles this step adds, in the overview at the current tier.
+  const extra = [r.deck, r.links, r.rails, r.pylons, r.cables, r.underglow, r.bridgeLamps, r.lampPools].concat(r.crosswalks ? [r.crosswalks.mesh] : []);
+  v.placeCamera(); await frame(); await frame();
+  const read = () => ({calls: v.renderer.info.render.calls, tris: v.renderer.info.render.triangles});
+  const withAll = read(); extra.forEach(o => { o.visible = false; }); await frame(); await frame(); const without = read(); extra.forEach(o => { o.visible = true; }); await frame();
+  out.budget = {calls: withAll.calls - without.calls, triangles: withAll.tris - without.tris, total: withAll};
+  return out;
+}"""
+
+
+def verify_bridges(engine, url, tamper=None):
+    """V4b (C6.3 as drawn, C6.4, C6.5, C11.3 crosswalk tees, C3.4 on bridges), with sound off: every new
+    material links; every bridge junction is paved without a gap (the ring band, stub and fillet corners
+    sampled every 0.04, each sample under a drawn deck or street triangle at its height; the deck carries a
+    polygon offset, so its coplanar overlap on a ring cannot z-fight); rails run along every ring and rim
+    road edge, both edges of every bridge span and every fillet curb except the bridge mouths, stage decks,
+    the pier's foot and the Reef shore, and never over a carriageway, a paved corner or a stage deck; bridge
+    walkers exist at every tier, use all 28 walk paths at Tier 3, and their paths sit on a road surface
+    (within 0.03, no step over 0.35) and never inside a footprint; packets follow the Lights limiter (0.3,
+    0.15 and 0.06 for Full, Soft and Calm in the overview with sound off: Calm is 20 % of the amplitude,
+    C12.2) and the tier (8, 5, 3 slots) and leave every bridge from the active room's end, and under reduced
+    motion (B9, a second load) the setting is Calm and no packet runs; every bridge lamp stands on its
+    bridge's left sidewalk at 0.51 and is drawn there; the step adds at most 25 draw calls and 150 k
+    triangles; the six Archive rim links are drawn (carriageway and both sidewalks every 0.1); and (V4 fix,
+    C11.3) a crosswalk stands at every one of the graph's 42 junctions: at each of the 28 tees across the
+    bridge's mouth on the ring's walking band, every stripe on paved mouth asphalt (off the ring's
+    carriageway and outside the fillet curbs), and every point of the ring walkers' line (0.04 outside the
+    kerb) over the mouth asphalt (0.06 clear of the curbs), sampled every 0.05, under the zebra; at each of
+    the 14 forks (the rim
+    road's two ends, the rim links' twelve) across the branch, every stripe on the branch's carriageway and
+    off every other road's carriageway and sidewalk, the stripes spanning the carriageway to within 0.1 of
+    both kerbs. tamper is JavaScript run first (the positive controls,
+    renders/snap/wip/tools/v4b_controls.py and renders/snap/wip/v4fix/controls.py)."""
+    engine.page.set_viewport_size({"width": 1440, "height": 900})
+    engine.goto(url)
+    engine.ready()
+    engine.wait(1.5)
+    got = engine.evaluate(BRIDGES_PROBE, [tamper])
+    names = BRIDGE_CHECKS
+    if got.get("missing"):
+        return got, {name: False for name in names}
+    # Reduced motion (B9): the Lights setting is Calm and the packets are off (level 0, no kick recorded).
+    engine.page.emulate_media(reduced_motion="reduce")
+    engine.goto(url)
+    engine.ready()
+    engine.wait(3)
+    got["reducedPackets"] = engine.evaluate("""() => { const v = window.__vc, p = v.roads.packets;
+      return {calm: v.lights.calm, level: p.level, kicks: p.count}; }""")
+    engine.page.emulate_media(reduced_motion="no-preference")
+    j, rl, w, p, lm, b, lk = got["junctions"], got["rails"], got["walkers"], got["packets"], got["lamps"], got["budget"], got["links"]
+    checks = {
+        names[0]: all(got["programs"].values()),
+        names[1]: j["sampled"] > 10000 and j["gaps"] == 0 and got["polygonOffset"],
+        names[2]: rl["required"] > 5000 and rl["missing"] == 0 and rl["meshVertices"] >= rl["neonVertices"],
+        names[3]: rl["railPoints"] > 5000 and rl["onRoad"] == 0,
+        names[4]: (all(t["bridgeWalkers"] > 0 for t in w["tiers"].values()) and w["tiers"]["3"]["paths"] == w["paths"] == 28 and
+                   w["pathGap"] <= 0.35 and w["surfaceMiss"] == 0 and w["surfaceMax"] <= 0.03 and w["blocked"] == 0 and w["styles"] == ["walk"]),
+        names[5]: (abs(p["levels"]["Full"] - 0.3) < 1e-3 and abs(p["levels"]["Soft"] - 0.15) < 1e-3 and abs(p["levels"]["Calm"] - 0.06) < 1e-3 and
+                   p["kicks"] > 0 and p["tierSlots"] == {"3": 8, "2": 5, "1": 3} and p["dirOk"] and not p["sound"] and
+                   got["reducedPackets"]["calm"] and got["reducedPackets"]["level"] == 0 and got["reducedPackets"]["kicks"] == 0),
+        names[6]: lm["count"] > 0 and lm["drawn"] == lm["count"] and lm["bad"] == 0,
+        names[7]: b["calls"] <= 25 and b["triangles"] <= 150000,
+        names[8]: lk["count"] == 6 and lk["samples"] > 1000 and lk["gaps"] == 0,
+        names[9]: (got["crosswalks"]["tees"] == 28 and got["crosswalks"]["forks"] == 14 and got["crosswalks"]["bad"] == 0 and
+                   got["crosswalks"]["stripes"] >= 42 * 4 and got["crosswalks"]["walkSamples"] > 500 and got["crosswalks"]["walkUncovered"] == 0),
+    }
+    return got, checks
+
+
+BRIDGE_CHECKS = ("bridge scene materials link and run", "bridge junctions paved without gaps or z-fighting",
+                 "rails guard every rim and bridge edge except the openings", "no rail over a road or stage deck",
+                 "walkers cross bridges at every tier on road surfaces", "bridge light packets follow the Lights limiter and tier",
+                 "bridge lamps follow the city lamp rule", "bridges add at most 25 draw calls and 150 k triangles",
+                 "Archive rim links drawn along their length", "a crosswalk at every junction on its walkers' line")
+
+
+# ---------------------------------------------------------------- V4c: graph traffic, light cycles, re-flow, decks
+# Shared page helpers for the V4c probes: segment grids in layout coordinates (x, y = -world z) and the
+# carriageway of every road the traffic drives (ring, avenue and rim road stretches, the rim links, the
+# bridges and the paved fillet corners), each with its height.
+CARRIAGEWAY_JS = r"""
+  const hyp = Math.hypot, RAD = Math.PI / 180;
+  function segGrid() {
+    const cells = new Map(), segs = [];
+    return {segs, add(s) { const id = segs.length; segs.push(s);
+        for (let i = Math.floor((Math.min(s.ax, s.bx) - s.half - .1) / 2); i <= Math.floor((Math.max(s.ax, s.bx) + s.half + .1) / 2); i++)
+          for (let j = Math.floor((Math.min(s.ay, s.by) - s.half - .1) / 2); j <= Math.floor((Math.max(s.ay, s.by) + s.half + .1) / 2); j++) {
+            const c = i * 100000 + j; if (!cells.has(c)) cells.set(c, []); cells.get(c).push(id); } },
+      near: (x, y) => cells.get(Math.floor(x / 2) * 100000 + Math.floor(y / 2)) || []};
+  }
+  function segDist(s, x, y) { const dx = s.bx - s.ax, dy = s.by - s.ay, l2 = dx * dx + dy * dy,
+    t = l2 ? Math.max(0, Math.min(1, ((x - s.ax) * dx + (y - s.ay) * dy) / l2)) : 0; return [hyp(x - s.ax - dx * t, y - s.ay - dy * t), t]; }
+  function carriageways(v) {
+    const r = v.roads, grid = segGrid(), corners = [];
+    // City streets as the page draws them: every route (the rim road only its own stretch, the boulevard
+    // carries the shared one), at the carriageway half width.
+    v.routes.forEach((route, ri) => { const P = route.points, n = P.length, m = route.open ? n - 1 : n;
+      for (let k = 0; k < m; k++) { const a = P[k], b = P[(k + 1) % n];
+        grid.add({kind: 'route', route: ri, bridge: -1, ax: a.x, ay: -a.z, bx: b.x, by: -b.z, za: a.y, zb: b.y, half: route.width / 2}); } });
+    for (const st of r.streets) for (let k = 0; k + 1 < st.points.length; k++) { const a = st.points[k], b = st.points[k + 1];
+      grid.add({kind: 'link', route: -1, bridge: -1, ax: a[0], ay: a[1], bx: b[0], by: b[1], za: st.z, zb: st.z, half: st.width / 2}); }
+    r.bridges.forEach((b, bi) => { let u = 0; for (let k = 0; k + 1 < b.points.length; k++) { const p = b.points[k], q = b.points[k + 1], l = hyp(q[0] - p[0], q[1] - p[1]);
+      grid.add({kind: 'bridge', route: -1, bridge: bi, ax: p[0], ay: p[1], bx: q[0], by: q[1], za: p[2], zb: q[2], half: b.width / 2, u0: u, len: l}); u += l; } });
+    for (const b of r.bridges) for (const e of b.ends) for (const f of e.fillets) corners.push({cx: f.cx, cy: f.cy, r: f.r, reach: f.r + .44, a0: f.a0, a1: f.a1, z: e.z});
+    // on(x, y, h): whether (x, y) lies on a carriageway whose surface is within 0.02 of h; ON.bridge and ON.u
+    // name the bridge (and the arc length along it) when the point is on a bridge carriageway.
+    const ON = {ok: false, bridge: -1, u: 0, d: 0};
+    function on(x, y, h) {
+      ON.ok = false; ON.bridge = -1; ON.u = 0; let bestBridge = Infinity;
+      for (const id of grid.near(x, y)) { const s = grid.segs[id], [d, t] = segDist(s, x, y);
+        if (d > s.half + 1e-3 || Math.abs(s.za + (s.zb - s.za) * t - h) > .02) continue;
+        ON.ok = true; if (s.bridge >= 0 && d < bestBridge) { bestBridge = d; ON.bridge = s.bridge; ON.u = s.u0 + t * s.len; } }
+      if (!ON.ok) for (const c of corners) { const dx = x - c.cx, dy = y - c.cy, d = hyp(dx, dy);
+        if (d < c.r - 1e-3 || d > c.reach || Math.abs(c.z - h) > .02) continue;
+        const u = (((Math.atan2(dy, dx) / RAD - c.a0) % 360 + 540) % 360 - 180) / (c.a1 - c.a0); if (u >= -1e-3 && u <= 1 + 1e-3) { ON.ok = true; break; } }
+      return ON;
+    }
+    return {grid, corners, on};
+  }
+"""
+
+TRAFFIC_PROBE = r"""([seconds, tamper]) => new Promise(resolve => {
+  const v = window.__vc, r = v.roads, cars = v.cars;
+  if (!r || !cars.traffic || !cars.cycles) { resolve({missing: true}); return; }
+  // Tier 3 for the whole probe (V4 fix), so every one of the twelve riders is bound by the crossing rule
+  // and the full vehicle count drives: the governor keeps running but the counts read Tier 3.
+  const tierDesc = Object.getOwnPropertyDescriptor(v.tier, 'current');
+  Object.defineProperty(v.tier, 'current', {get: () => 3, configurable: true}); v.tier.apply();
+  if (tamper) (0, eval)(tamper);
+""" + CARRIAGEWAY_JS + r"""
+  v.updateWeek(12);
+  const C = carriageways(v), info = r.bridgeInfo, cyc = cars.cycles;
+  const runs = new Map(), traversed = new Map(), perBridge = new Array(info.length).fill(0), lastLane = new Map(), overtakes = new Set(), shownTicks = new Array(cyc.items.length).fill(0);
+  let ticks = 0, samples = 0, off = 0, cycleSamples = 0, cycleOff = 0, visibleMin = Infinity, visibleMax = 0;
+  // C5.4 spacing, from 2 s on (a tier change reveals parked vehicles where they stood): bumper gaps between
+  // neighbours in one lane (track and direction), and any two shown vehicles in world space heading the
+  // same way whose bodies overlap along the leader's heading while less than 0.08 apart across it (merges,
+  // diverges, crossings, taxis rejoining). Pulled-in taxis stand at the kerb and are left out.
+  let lanePairs = 0, laneMin = Infinity, worldPairs = 0, worldMin = Infinity; const spacingExamples = [];
+  const offExamples = [], started = performance.now();
+  // A run is a stretch of samples inside one bridge's span (between its two fillet tangencies); it counts
+  // as a traversal when it starts within 0.5 of one end, ends within 0.5 of the other and never turns back.
+  function track(id, bridge, u) {
+    let run = runs.get(id);
+    if (run && run.bridge !== bridge) { finish(id, run); run = null; }
+    if (bridge < 0) { if (run) finish(id, run); runs.delete(id); return; }
+    if (!run) { runs.set(id, {bridge, u0: u, u1: u, sign: 0, back: false}); return; }
+    const du = u - run.u1; if (Math.abs(du) > 1e-4) { const s = Math.sign(du); if (run.sign && s !== run.sign) run.back = true; run.sign = run.sign || s; }
+    run.u1 = u;
+  }
+  function finish(id, run) {
+    const I = info[run.bridge], a = I.bsA + .5, b = I.length - I.bsB - .5;
+    if (!run.back && ((run.u0 <= a && run.u1 >= b) || (run.u0 >= b && run.u1 <= a))) {
+      if (!traversed.has(id)) traversed.set(id, []); traversed.get(id).push(run.bridge); perBridge[run.bridge]++; }
+  }
+  function sample(id, a, o, isCycle) {
+    const x = a[o + 12], y = -a[o + 14], h = a[o + 13] - .006, q = C.on(x, y, h);
+    if (isCycle) cycleSamples++; else samples++;
+    if (!q.ok) { if (isCycle) cycleOff++; else off++; if (offExamples.length < 12) offExamples.push({id, x: +x.toFixed(3), y: +y.toFixed(3), h: +h.toFixed(3)}); }
+    let bridge = -1, u = 0;
+    if (q.ok && q.bridge >= 0) { const I = info[q.bridge]; if (q.u >= I.bsA - .05 && q.u <= I.length - I.bsB + .05) { bridge = q.bridge; u = q.u; } }
+    track(id, bridge, u);
+  }
+  function spacing(t) {
+    const lanes = new Map(), shown = [];
+    for (let k = 0; k < v.carState.length; k++) { const c = v.carState[k], a = c.mesh.instanceMatrix.array, o = c.slot * 16;
+      if (a[o + 15] !== 1 || hyp(a[o], a[o + 1], a[o + 2]) < .5 || c.pull > .35 || c.tk < 0) continue;
+      shown.push([c, a[o + 12], a[o + 13], a[o + 14], a[o + 8], a[o + 10]]);
+      const key = c.tk * 2 + (c.td > 0 ? 0 : 1); if (!lanes.has(key)) lanes.set(key, []); lanes.get(key).push(c); }
+    for (const list of lanes.values()) { list.sort((p, q) => p.q - q.q);
+      for (let i = 0; i + 1 < list.length; i++) { const g = list[i + 1].q - list[i].q - list[i].halfLen - list[i + 1].halfLen; lanePairs++; laneMin = Math.min(laneMin, g);
+        if (g < -.05 && spacingExamples.length < 8) spacingExamples.push({t, lane: true, gap: +g.toFixed(3), a: list[i].type, b: list[i + 1].type}); } }
+    for (let i = 0; i < shown.length; i++) for (let j = i + 1; j < shown.length; j++) { const A = shown[i], B = shown[j], dx = B[1] - A[1], dz = B[3] - A[3];
+      if (Math.abs(dx) > 1.2 || Math.abs(dz) > 1.2 || Math.abs(B[2] - A[2]) > .1 || A[4] * B[4] + A[5] * B[5] < 0) continue;
+      const hl = hyp(A[4], A[5]) || 1, along = Math.abs((dx * A[4] + dz * A[5]) / hl), across = Math.abs((dx * A[5] - dz * A[4]) / hl);
+      if (across >= .08) continue; const over = along - A[0].halfLen - B[0].halfLen; worldPairs++; worldMin = Math.min(worldMin, over);
+      if (over < -.05 && spacingExamples.length < 8) spacingExamples.push({t, lane: false, over: +over.toFixed(3), a: A[0].type, b: B[0].type, tracks: [r.traffic.tracks[A[0].tk].kind, r.traffic.tracks[B[0].tk].kind]}); }
+  }
+  function tick() {
+    ticks++;
+    const now = (performance.now() - started) / 1000; if (now >= 2) spacing(+now.toFixed(1));
+    for (let k = 0; k < v.carState.length; k++) { const c = v.carState[k], a = c.mesh.instanceMatrix.array, o = c.slot * 16;
+      if (a[o + 15] === 1 && hyp(a[o], a[o + 1], a[o + 2]) > .5) sample(k, a, o, false); }
+    const A = cyc.mesh.instanceMatrix.array; let shown = 0;
+    for (let k = 0; k < cyc.items.length; k++) { const o = k * 16; if (A[o + 15] !== 1) continue; shown++; shownTicks[k]++; sample(1000 + k, A, o, true);
+      // An overtake: the cycle was behind a vehicle in the same lane at the previous sample and is ahead now.
+      const c = cyc.items[k], key = c.tk * 2 + (c.td > 0 ? 0 : 1), prev = lastLane.get(k), now = new Map();
+      for (let j = 0; j < v.carState.length; j++) { const w = v.carState[j]; if (!w.on || w.tk * 2 + (w.td > 0 ? 0 : 1) !== key) continue;
+        now.set(j, w.q - c.q); if (prev && prev.key === key && prev.rel.has(j) && prev.rel.get(j) > 0 && w.q - c.q < 0) overtakes.add(k + ':' + j); }
+      lastLane.set(k, {key, rel: now}); }
+    visibleMin = Math.min(visibleMin, shown); visibleMax = Math.max(visibleMax, shown);
+    if (performance.now() - started >= seconds * 1000) {
+      clearInterval(timer); for (const [id, run] of runs) finish(id, run);
+      Object.defineProperty(v.tier, 'current', tierDesc); v.tier.apply();
+      const carIds = [...traversed.keys()].filter(id => id < 1000), cycleIds = [...traversed.keys()].filter(id => id >= 1000);
+      const trailColors = cyc.items.map((c, k) => { const col = cyc.trail.geometry.attributes.aColor; const n = cyc.trailSamples * 2; return [col.getX(k * n), col.getY(k * n), col.getZ(k * n)]; });
+      resolve({seconds, ticks, rateHz: ticks / ((performance.now() - started) / 1000), samples, off, cycleSamples, cycleOff, offExamples,
+        vehiclesTraversing: carIds.length, traversals: carIds.reduce((s, id) => s + traversed.get(id).length, 0), perBridge,
+        bridgesUsed: perBridge.filter(n => n > 0).length, cyclesTraversing: cycleIds.length, cycleTraversals: cycleIds.reduce((s, id) => s + traversed.get(id).length, 0),
+        overtakes: overtakes.size, visibleMin, visibleMax, alwaysShown: shownTicks.map((n, k) => n === ticks ? k : -1).filter(k => k >= 0),
+        alwaysShownTraversing: shownTicks.filter((n, k) => n === ticks && traversed.has(1000 + k)).length, perRider: cyc.items.map((c, k) => (traversed.get(1000 + k) || []).length), tier: v.tier.current, cycleTarget: cyc.tier[v.tier.current],
+        trailColors, districts: cyc.items.map(c => c.district),
+        spacing: {lanePairs, laneMin: +laneMin.toFixed(3), worldPairs, worldMin: +worldMin.toFixed(3), examples: spacingExamples},
+        // Each shown rider's trail as drawn: the length of its foot line, sample to sample.
+        trailLength: cyc.trailLength, trailLengths: cyc.items.map((c, k) => { if (!c.on) return null; const P = cyc.trail.geometry.attributes.position.array, b = k * cyc.trailSamples * 6;
+          let len = 0; for (let j = 0; j + 1 < cyc.trailSamples; j++) len += hyp(P[b + (j + 1) * 6] - P[b + j * 6], P[b + (j + 1) * 6 + 1] - P[b + j * 6 + 1], P[b + (j + 1) * 6 + 2] - P[b + j * 6 + 2]);
+          return +len.toFixed(3); }),
+        // Each rider's home colour as the page shows it on the district's chip (sRGB 0 to 255), and each trail's colour in sRGB.
+        chipColors: cyc.items.map(c => { const el = document.querySelector('.chip[data-d="' + c.district + '"]'), m = el && el.style.getPropertyValue('--c').match(/[0-9.]+/g); return m ? m.slice(0, 3).map(Number) : null; }),
+        trailSrgb: trailColors.map(c => c.map(x => 255 * (x <= .0031308 ? 12.92 * x : 1.055 * Math.pow(x, 1 / 2.4) - .055)))});
+    }
+  }
+  const timer = setInterval(tick, 100);
+})"""
+
+CYCLE_TIERS_PROBE = r"""() => new Promise(resolve => {
+  const v = window.__vc, cyc = v.cars.cycles, desc = Object.getOwnPropertyDescriptor(v.tier, 'current'), levels = [3, 2, 1], out = {};
+  let k = 0;
+  function next() {
+    if (k === levels.length) { Object.defineProperty(v.tier, 'current', desc); resolve(out); return; }
+    const level = levels[k++]; Object.defineProperty(v.tier, 'current', {get: () => level, configurable: true});
+    let frames = 0;
+    (function wait() { if (++frames < 20) { requestAnimationFrame(wait); return; }
+      const A = cyc.mesh.instanceMatrix.array, P = cyc.trail.geometry.attributes.position.array, n = cyc.trailSamples * 2; let shown = 0, trails = 0;
+      for (let i = 0; i < cyc.items.length; i++) { if (A[i * 16 + 15] === 1) shown++;
+        // A drawn trail: its samples do not all sit on one point.
+        const b = i * n * 3; let span = 0; for (let j = 0; j < n; j++) span = Math.max(span, Math.hypot(P[b + j * 3] - P[b], P[b + j * 3 + 2] - P[b + 2]));
+        if (span > .3) trails++; }
+      out[level] = {shown, trails, want: cyc.tier[level]}; next(); })();
+  }
+  next();
+})"""
+
+
+def verify_traffic(engine, url, tamper=None, seconds=60):
+    """V4c (C5.4, C7.6): graph traffic on a fresh page at week 12, held at Tier 3 for the whole probe (V4
+    fix: the counts read Tier 3 whatever the governor does), sampled at 10 Hz for 60 s from the rendered
+    instance matrices. 'traffic crosses bridges': at least 10 distinct vehicles cross a bridge end to end (a
+    run inside one span from within 0.5 of one fillet tangency to within 0.5 of the other, never turning
+    back) and every sampled vehicle position lies on a carriageway (a ring, avenue or rim road stretch, a
+    rim link, a bridge or a paved fillet corner, inside its carriageway half width and within 0.02 of its
+    surface height), with at least 90 % of the 600 ticks taken. 'NPC light cycles cruise the bridge
+    network': 12, 7 and 4 riders with drawn trails at Tiers 3, 2 and 1 (Tier 2 is 60 % of the count,
+    C13.1), all twelve riders shown for the whole 60 s and every one of them crosses a bridge end to end,
+    riders overtake traffic, every rider sample lies on a carriageway, the twelve
+    riders come from twelve districts and each trail is its home district's chip colour (within 0.6 of 255
+    in sRGB; Downtown and the Gate share a colour). 'vehicles keep their spacing in lanes and at merges'
+    (V4 fix, C5.4): from 2 s on, no two neighbours in one lane overlap bumper to bumper by more than 0.05
+    and no two shown vehicles heading the same way overlap by more than 0.05 along the leader's heading
+    while less than 0.08 apart across it (merges, diverges, taxis rejoining), over at least 20,000 lane
+    pairs. 'NPC light-cycle trails keep their length' (V4 fix, C7.6): at the end, each of the twelve riders'
+    trails as drawn (its foot line, sample to sample) is within 0.3 under and 0.01 over the published
+    trailLength (5.46), whatever the frame rate (the samples no longer stretch on slow frames). tamper is
+    JavaScript run first (the positive controls, renders/snap/wip/v4c/controls.py and
+    renders/snap/wip/v4fix/controls.py)."""
+    engine.page.set_viewport_size({"width": 1440, "height": 900})
+    engine.goto(url)
+    engine.ready()
+    engine.wait(1)
+    got = engine.evaluate(TRAFFIC_PROBE, [seconds, tamper])
+    if got.get("missing"):
+        return got, {name: False for name in TRAFFIC_CHECKS}
+    got["cycleTiers"] = engine.evaluate(CYCLE_TIERS_PROBE)
+    tiers = got["cycleTiers"]
+    checks = {
+        TRAFFIC_CHECKS[0]: (got["ticks"] >= 0.9 * seconds * 10 and got["samples"] > 0 and got["off"] == 0 and
+                            got["vehiclesTraversing"] >= 10),
+        TRAFFIC_CHECKS[1]: (all(tiers[str(level)]["shown"] == want and tiers[str(level)]["trails"] == want
+                                for level, want in ((3, 12), (2, 7), (1, 4))) and
+                            got["cycleSamples"] > 0 and got["cycleOff"] == 0 and
+                            len(got["alwaysShown"]) == 12 and got["alwaysShownTraversing"] == 12 and got["overtakes"] > 0 and
+                            len(set(got["districts"])) == 12 and all(got["chipColors"]) and
+                            all(abs(a - b) <= 0.6 for c, h in zip(got["trailSrgb"], got["chipColors"]) for a, b in zip(c, h))),
+        TRAFFIC_CHECKS[2]: (got["spacing"]["lanePairs"] >= 20000 and got["spacing"]["laneMin"] >= -0.05 and
+                            got["spacing"]["worldMin"] >= -0.05),
+        TRAFFIC_CHECKS[3]: (len([x for x in got["trailLengths"] if x is not None]) == 12 and
+                            all(got["trailLength"] - 0.3 <= x <= got["trailLength"] + 0.01 for x in got["trailLengths"] if x is not None)),
+    }
+    return got, checks
+
+
+TRAFFIC_CHECKS = ("traffic crosses bridges", "NPC light cycles cruise the bridge network",
+                  "vehicles keep their spacing in lanes and at merges", "NPC light-cycle trails keep their length")
+
+
+REFLOW_PROBE = r"""([tamper]) => {
+  const v = window.__vc, r = v.roads, V = v.venues;
+  if (!r || !V.meshes.stageDecks) return {missing: true};
+  if (tamper) (0, eval)(tamper);
+""" + CARRIAGEWAY_JS + r"""
+  v.updateWeek(12);
+  const decks = V.meshes.stageDecks.instanceMatrix.array, lake = r.lake, pier = lake && lake.pier, isl = lake && lake.island;
+  // The lake's signed shore distance (720 samples, refined), as qa_design.py measures it.
+  const ca = lake ? Math.cos(lake.angle) : 1, sa = lake ? Math.sin(lake.angle) : 0;
+  function lakeGap(x, y) { if (!lake) return Infinity; const dx = x - lake.cx, dy = y - lake.cy, u = dx * ca + dy * sa, w = -dx * sa + dy * ca;
+    const f = t => (lake.rx * Math.cos(t) - u) ** 2 + (lake.ry * Math.sin(t) - w) ** 2; let i0 = 0, b0 = Infinity;
+    for (let i = 0; i < 720; i++) { const q = f(i * 2 * Math.PI / 720); if (q < b0) { b0 = q; i0 = i; } }
+    let lo = (i0 - 1) * 2 * Math.PI / 720, hi = (i0 + 1) * 2 * Math.PI / 720;
+    for (let k = 0; k < 30; k++) { const m1 = lo + (hi - lo) / 3, m2 = hi - (hi - lo) / 3; if (f(m1) < f(m2)) hi = m2; else lo = m1; }
+    const d = Math.sqrt(f((lo + hi) / 2)); return (u / lake.rx) ** 2 + (w / lake.ry) ** 2 < 1 ? -d : d; }
+  const S = (ax, ay, bx, by, half) => ({ax, ay, bx, by, half});
+  const bridgeSegs = [], filletArcs = [], rimSegs = [];
+  r.bridges.forEach(b => { for (let k = 0; k + 1 < b.points.length; k++) bridgeSegs.push(S(b.points[k][0], b.points[k][1], b.points[k + 1][0], b.points[k + 1][1], .57)); });
+  for (const b of r.bridges) for (const e of b.ends) for (const f of e.fillets) { const n = Math.max(2, Math.ceil(Math.abs(f.a1 - f.a0) * RAD * f.r / .05));
+    for (let j = 0; j <= n; j++) { const a = (f.a0 + (f.a1 - f.a0) * j / n) * RAD; filletArcs.push([f.cx + f.r * Math.cos(a), f.cy + f.r * Math.sin(a)]); } }
+  v.routes.forEach(route => { if (route.kind !== 'rim') return; const P = route.points;
+    for (let k = 0; k + 1 < P.length; k++) rimSegs.push(S(P[k].x, -P[k].z, P[k + 1].x, -P[k + 1].z, route.width / 2 + .13)); });
+  for (const st of r.streets) for (let k = 0; k + 1 < st.points.length; k++) rimSegs.push(S(st.points[k][0], st.points[k][1], st.points[k + 1][0], st.points[k + 1][1], st.width / 2 + .13));
+  const pierSeg = pier ? S(pier.x0, pier.y0, pier.x1, pier.y1, .25) : null;
+  const minOver = (segs, x, y, r0) => { let m = Infinity; for (const s of segs) m = Math.min(m, segDist(s, x, y)[0] - s.half - r0); return m; };
+  const arcGap = (x, y, r0) => { let m = Infinity; for (const p of filletArcs) m = Math.min(m, hyp(p[0] - x, p[1] - y) - .13 - r0); return m; };
+  // Stage decks as rendered: the deck instance's centre and radius. Clearances as qa_design.py requires:
+  // 0.5 from every bridge deck edge (0.57), fillet curb (0.13 round the fillet arc), the lake and the
+  // pier (0.25) except the Reef's own island stage; from the rim road and links 0.5, the Archive's own 0.
+  const stageRows = [];
+  v.stages.forEach((s, i) => { const o = i * 16, x = decks[o + 12], y = -decks[o + 14], rad = hyp(decks[o], decks[o + 1], decks[o + 2]);
+    const reef = s.district === 'reef', gaps = {bridge: minOver(bridgeSegs, x, y, rad), fillet: arcGap(x, y, rad),
+      lake: reef ? Infinity : lakeGap(x, y) - rad, pier: reef || !pierSeg ? Infinity : minOver([pierSeg], x, y, rad),
+      rim: minOver(rimSegs, x, y, rad) - (s.district === 'episodic' ? 0 : .5) + .5};
+    const worst = Object.entries(gaps).reduce((a, b) => b[1] < a[1] ? b : a);
+    stageRows.push({district: s.district, x: +x.toFixed(3), y: +y.toFixed(3), r: +rad.toFixed(3), worst: worst[0], clearance: +worst[1].toFixed(3), pass: worst[1] >= .5 - 1e-6}); });
+  // Terraces (three depths by three positions across each terrace, as qa_design.py samples them, from the
+  // rendered venue frame) and every drawn furniture item except the road's manholes, against the bridge
+  // landings (deck edge 0.57, fillet curb 0.13), the pier (0.25), the rim road and links and the lake.
+  const FR = {table: .06, chair: .035, crate: .05, cart: .12, bin: .04, kiosk: .14, busstop: .16};
+  function hit(x, y, r0) {
+    if (minOver(bridgeSegs, x, y, r0) < 0) return 'bridge';
+    if (arcGap(x, y, r0) < 0) return 'fillet';
+    if (pierSeg && minOver([pierSeg], x, y, r0) < 0) return 'pier';
+    if (minOver(rimSegs, x, y, r0) < 0) return 'rim road or link';
+    if (lake && lakeGap(x, y) < r0 && !(isl && hyp(x - isl.x, y - isl.y) <= isl.r - r0)) return 'lake';
+    return null;
+  }
+  const terraceHits = [], furnitureHits = []; let terraceSamples = 0, furnitureDrawn = 0;
+  for (const q of V.items) { if (!q.terrace) continue;
+    for (const a of [.1, q.terrace * .5, q.terrace]) for (const bb of [-.35, 0, .35]) { terraceSamples++;
+      const x = q.face.x + q.normal.x * a + q.right.x * bb * q.length, y = -(q.face.z + q.normal.z * a + q.right.z * bb * q.length), why = hit(x, y, 0);
+      if (why) terraceHits.push({venue: q.index, why}); } }
+  for (const f of V.furniture) { if (f.kind === 'manhole') continue; const A = f.mesh.instanceMatrix.array, o = f.slot * 16;
+    if (hyp(A[o], A[o + 1], A[o + 2]) < 1e-3) continue; furnitureDrawn++;
+    const why = hit(A[o + 12], -A[o + 14], FR[f.kind] ?? .1); if (why) furnitureHits.push({item: f.index, kind: f.kind, why}); }
+
+  // The rest of C4.1 (V4 fix), on the same rendered positions. Every stage deck, terrace sample and drawn
+  // furniture item keeps off every street's carriageway and both walking lanes: route.width / 2 + 0.11 from
+  // the centreline (the lane 0.04 outside the kerb plus a walker's 0.07), the rim road's own stretch
+  // included. Free-standing things (stage decks, carts, kiosks, bins, bus stops) clear every building
+  // footprint (the 0.57 overhang, every node) by 0.2; a terrace sample stands on no footprint but its host's;
+  // a terrace set (a venue's tables, chairs and crates) is the venue's, so only its terrace is checked there.
+  // Nothing overlaps anything else: stage and stage, stage and item (a cart on its own stage deck excepted),
+  // item and item (one venue's terrace set excepted), and no terrace sample lies on a stage deck.
+  const laneGrid = segGrid();
+  v.routes.forEach((route, ri) => { const P = route.points, n = P.length, m = route.open ? n - 1 : n;
+    for (let k = 0; k < m; k++) { const a = P[k], b = P[(k + 1) % n]; laneGrid.add({ax: a.x, ay: -a.z, bx: b.x, by: -b.z, half: route.width / 2 + .11, route: ri}); } });
+  const laneGap = (x, y, r0) => { let g = Infinity, who = -1; const seen = new Set();
+    for (let i = Math.floor((x - r0 - .1) / 2); i <= Math.floor((x + r0 + .1) / 2); i++) for (let j = Math.floor((y - r0 - .1) / 2); j <= Math.floor((y + r0 + .1) / 2); j++)
+      for (const id of laneGrid.near(i * 2 + 1, j * 2 + 1)) { if (seen.has(id)) continue; seen.add(id); const sg = laneGrid.segs[id], d = segDist(sg, x, y)[0] - sg.half - r0; if (d < g) { g = d; who = sg.route; } }
+    return [g, who]; };
+  const boxes = new Map();
+  v.nodes.forEach(n => { const x0 = n.x - n.w * .57, x1 = n.x + n.w * .57, y0 = n.y - n.d * .57, y1 = n.y + n.d * .57;
+    for (let i = Math.floor((x0 - 3) / 2); i <= Math.floor((x1 + 3) / 2); i++) for (let j = Math.floor((y0 - 3) / 2); j <= Math.floor((y1 + 3) / 2); j++) {
+      const c = i * 100000 + j; if (!boxes.has(c)) boxes.set(c, []); boxes.get(c).push({n, x0, x1, y0, y1}); } });
+  // The page carries building positions to 0.01 (design.py measures the unrounded ones), so a footprint
+  // clearance read here may be up to 0.01 short of the one design.py guaranteed; qa_design.py checks the exact 0.2.
+  const FOOT_TOL = .01;
+  const footGap = (x, y, skip) => { let g = Infinity; for (const b of boxes.get(Math.floor(x / 2) * 100000 + Math.floor(y / 2)) || []) { if (b.n === skip) continue;
+    g = Math.min(g, hyp(Math.max(0, b.x0 - x, x - b.x1), Math.max(0, b.y0 - y, y - b.y1))); } return g; };
+  const laneHits = [], footHits = [], pairHits = [];
+  const note = (list, row) => { list.push(row); };
+  const stagesAt = v.stages.map((s, i) => { const o = i * 16; return {i, index: s.index, district: s.district, kind: s.kind, x: decks[o + 12], y: -decks[o + 14], r: hyp(decks[o], decks[o + 1], decks[o + 2])}; });
+  for (const st of stagesAt) { const [lg, who] = laneGap(st.x, st.y, st.r); if (lg < -1e-3) note(laneHits, {stage: st.district, route: who, gap: +lg.toFixed(3)});
+    const fg = footGap(st.x, st.y, null) - st.r; if (fg < .2 - FOOT_TOL) note(footHits, {stage: st.district, gap: +fg.toFixed(3)}); }
+  for (let i = 0; i < stagesAt.length; i++) for (let j = i + 1; j < stagesAt.length; j++) { const a = stagesAt[i], b = stagesAt[j];
+    if (hyp(a.x - b.x, a.y - b.y) < a.r + b.r - 1e-3) note(pairHits, {stages: [a.district, b.district]}); }
+  let reflowSamples = 0;
+  for (const q of V.items) { if (!q.terrace) continue;
+    for (const a of [.1, q.terrace * .5, q.terrace]) for (const bb of [-.35, 0, .35]) { reflowSamples++;
+      const x = q.face.x + q.normal.x * a + q.right.x * bb * q.length, y = -(q.face.z + q.normal.z * a + q.right.z * bb * q.length);
+      const [lg, who] = laneGap(x, y, 0); if (lg < -1e-3) note(laneHits, {venue: q.index, route: who, gap: +lg.toFixed(3)});
+      if (footGap(x, y, q.host) <= 0) note(footHits, {venue: q.index, terrace: true});
+      for (const st of stagesAt) if (hyp(x - st.x, y - st.y) < st.r - 1e-3) note(pairHits, {venue: q.index, stage: st.district}); } }
+  const drawn = [];
+  for (const f of V.furniture) { if (f.kind === 'manhole') continue; const A = f.mesh.instanceMatrix.array, o = f.slot * 16;
+    if (hyp(A[o], A[o + 1], A[o + 2]) < 1e-3) continue; drawn.push({f, x: A[o + 12], y: -A[o + 14], r: FR[f.kind] ?? .1}); }
+  for (const d of drawn) { const f = d.f, [lg, who] = laneGap(d.x, d.y, d.r);
+    if (lg < -1e-3) note(laneHits, {item: f.index, kind: f.kind, route: who, gap: +lg.toFixed(3)});
+    if (!(f.venue >= 0)) { const fg = footGap(d.x, d.y, null) - d.r; if (fg < .2 - FOOT_TOL) note(footHits, {item: f.index, kind: f.kind, gap: +fg.toFixed(3)}); }
+    for (const st of stagesAt) if (f.stage !== st.index && hyp(d.x - st.x, d.y - st.y) < st.r + d.r - 1e-3) note(pairHits, {item: f.index, kind: f.kind, stage: st.district}); }
+  for (let i = 0; i < drawn.length; i++) for (let j = i + 1; j < drawn.length; j++) { const a = drawn[i], b = drawn[j];
+    if (Math.abs(a.x - b.x) > .5 || Math.abs(a.y - b.y) > .5) continue;
+    if (a.f.venue >= 0 && a.f.venue === b.f.venue) continue;
+    if (hyp(a.x - b.x, a.y - b.y) < a.r + b.r - 1e-3) note(pairHits, {items: [a.f.index, b.f.index], kinds: [a.f.kind, b.f.kind]}); }
+  return {stages: stageRows, stagesClear: stageRows.filter(s => s.pass).length, terraceSamples, terraceHits: terraceHits.slice(0, 10), terraceHitCount: terraceHits.length,
+    furnitureDrawn, furnitureHits: furnitureHits.slice(0, 10), furnitureHitCount: furnitureHits.length,
+    c41: {stages: stagesAt.length, terraceSamples: reflowSamples, items: drawn.length, laneHitCount: laneHits.length, laneHits: laneHits.slice(0, 10),
+      footHitCount: footHits.length, footHits: footHits.slice(0, 10), pairHitCount: pairHits.length, pairHits: pairHits.slice(0, 10)}};
+}"""
+
+
+def verify_reflow(engine, tamper=None):
+    """V4c (C4.1 as rendered): 'stages and venues re-flowed with zero overlaps' on the page at week 12. Every
+    stage deck instance (its centre and radius) keeps qa_design.py's 0.5 from the bridge deck edges, the
+    fillet curbs, the lake and the pier (the Reef's island stage excepted) and the rim road and links (the
+    Archive's own stage 0); no venue terrace sample and no drawn furniture item (manholes are road decals)
+    stands on a bridge landing, fillet, the pier, the rim road, a link or the lake. And (V4 fix) the rest of
+    C4.1 on the same rendered positions: every stage deck, terrace sample and drawn furniture item stays off
+    every street's carriageway and both walking lanes (route.width / 2 + 0.11 from the centreline, the rim
+    road's own stretch included); stage decks and free-standing furniture clear every building footprint
+    (0.57 overhang) by 0.2, a terrace sample stands on no footprint but its host's (terrace sets belong to
+    their venue); and nothing overlaps anything else (a cart on its own stage and one venue's terrace set
+    excepted). tamper is JavaScript run first (the positive controls, renders/snap/wip/v4fix/controls.py:
+    a kiosk moved onto the Downtown ring, the Downtown stage deck pushed 1.2 into its ring road, a bin
+    stacked on a cart, a stage deck set against a building)."""
+    got = engine.evaluate(REFLOW_PROBE, [tamper])
+    if got.get("missing"):
+        return got, {REFLOW_CHECK: False}
+    c = got["c41"]
+    return got, {REFLOW_CHECK: len(got["stages"]) == 12 and got["stagesClear"] == 12 and got["terraceSamples"] > 0 and
+                 got["terraceHitCount"] == 0 and got["furnitureDrawn"] > 400 and got["furnitureHitCount"] == 0 and
+                 c["stages"] == 12 and c["terraceSamples"] > 400 and c["items"] > 400 and
+                 c["laneHitCount"] == 0 and c["footHitCount"] == 0 and c["pairHitCount"] == 0}
+
+
+REFLOW_CHECK = "stages and venues re-flowed with zero overlaps"
+
+
+DECKS_PROBE = r"""([tamper]) => {
+  const v = window.__vc, r = v.roads;
+  if (!r || !r.bridgeRoutes) return {missing: true};
+  if (tamper) (0, eval)(tamper);
+  v.updateWeek(12);
+  const V3 = v.camera.position.constructor, eye = new V3(), look = new V3();
+  const failures = {deck: [], ride: [], walk: [], chase: []}; let samples = 0, turnSamples = 0;
+  // The ring checks of qa_city.py on every bridge route (the deck centreline from tee to tee): the road
+  // point 0.64 up and the ride pose's eye clear of every footprint by 0.14 with a clear sight line, both
+  // walking lanes 0.18 up clear by 0.07; and a chase camera 0.75 behind and 0.32 above the deck looking at
+  // the point 2.2 ahead at the same height, its eye clear by 0.14 with a clear sight line (C7.3).
+  const chase = (route, d, name, bucket) => {
+    v.sampleRoute(route, d - .75, eye); eye.y += .32; v.sampleRoute(route, d + 2.2, look); look.y += .32;
+    if (v.pointBlocked(eye, .14, false) || !v.clearSight(eye, look)) bucket.push({route: name, d: +d.toFixed(2)}); };
+  r.bridgeRoutes.forEach((route, i) => { const clearance = r.bridges[i].clearance;
+    for (let d = 0; d < route.length; d += .10) { samples++;
+      const raw = v.sampleRoute(route, d); raw.y += .64;
+      if (v.pointBlocked(raw, .14, false)) failures.deck.push({route: route.name, d: +d.toFixed(2)});
+      const p = v.poseOnRoute(route, d);
+      if (v.pointBlocked(p.eye, .14, false) || !v.clearSight(p.eye, p.look)) failures.ride.push({route: route.name, d: +d.toFixed(2)});
+      for (const side of [-1, 1]) { const foot = v.sampleRoute(route, d, undefined, Math.min(route.width / 2 + .04, clearance - .12) * side); foot.y += .18;
+        if (v.pointBlocked(foot, .07, false)) failures.walk.push({route: route.name, d: +d.toFixed(2), side}); }
+      chase(route, d, route.name, failures.chase); } });
+  // The turn arcs through the junction fillets, which traffic and the tour drive: the road point and the
+  // chase camera, every 0.1.
+  const turnFail = [];
+  r.graph.turns.forEach((t, k) => { const pts = t.points.map(q => new V3(q[0], q[2], -q[1])), lengths = [0];
+    for (let i = 1; i < pts.length; i++) lengths.push(lengths[i - 1] + pts[i - 1].distanceTo(pts[i]));
+    const route = {points: pts, lengths, length: lengths[lengths.length - 1], open: true};
+    for (let d = 0; d < route.length; d += .10) { turnSamples++; const raw = v.sampleRoute(route, d); raw.y += .64;
+      if (v.pointBlocked(raw, .14, false)) turnFail.push({turn: k, d: +d.toFixed(2), why: 'deck'});
+      const before = turnFail.length; chase(route, d, 'turn ' + k, turnFail); if (turnFail.length > before) turnFail[turnFail.length - 1].why = 'chase'; } });
+  return {bridges: r.bridgeRoutes.length, samples, turnSamples,
+    deckFailures: failures.deck.length, rideFailures: failures.ride.length, walkFailures: failures.walk.length, chaseFailures: failures.chase.length,
+    turnFailures: turnFail.length, examples: {deck: failures.deck.slice(0, 5), ride: failures.ride.slice(0, 5), walk: failures.walk.slice(0, 5),
+      chase: failures.chase.slice(0, 5), turns: turnFail.slice(0, 5)}};
+}"""
+
+
+def verify_deck_clearance(engine, tamper=None):
+    """V4c (C6.7 on the rendered page): every bridge's deck surface, both walking lanes, the ride pose and a
+    chase camera path, sampled every 0.1 unit with qa_city.py's thresholds against the page's own footprint
+    test (pointBlocked, which includes canopies and roof equipment), and the 56 fillet turn arcs' road
+    points and chase camera. tamper is JavaScript run first (the positive controls)."""
+    got = engine.evaluate(DECKS_PROBE, [tamper])
+    if got.get("missing"):
+        return got, {DECKS_CHECK: False}
+    return got, {DECKS_CHECK: got["bridges"] == 14 and got["samples"] > 1000 and got["turnSamples"] > 500 and
+                 got["deckFailures"] == 0 and got["rideFailures"] == 0 and got["walkFailures"] == 0 and
+                 got["chaseFailures"] == 0 and got["turnFailures"] == 0}
+
+
+DECKS_CHECK = "rendered bridge decks, walking lanes and chase camera clear every footprint"
+
+
+GOVERNOR_WORK = """() => {
+  const v = window.__vc, t = v.tier, log = [];
+  // Look away from the overview first: no tier change below may move the camera.
+  const eye = [v.controls.target.x + 7.5, v.controls.target.y + 3.25, v.controls.target.z - 5.5];
+  v.camera.position.set(...eye);
+  let elapsed = 0;
+  function feed(ms, work, count, stop) {
+    for (let i = 0; i < count; i++) {
+      const before = t.current; t.update(ms, work); elapsed += ms;
+      if (t.current !== before) { log.push({at: elapsed, before, after: t.current}); if (stop) return elapsed; }
+    }
+    return null;
+  }
+  feed(20, 20, 300);
+  const low = t.current, heavyStart = elapsed;
+  feed(16.7, 14, 1800);
+  const heavyHeld = t.current === low;
+  const fastStart = elapsed, climbAt = feed(16.7, 6, 1800, true), climbed = t.current;
+  feed(20, 20, 300);
+  const dropped = t.current, need = t.climbNeedMs ?? null;
+  const fast2 = elapsed, climbAt2 = feed(16.7, 6, 3000, true), climbed2 = t.current;
+  // A page that still misses frames at Tier 1 (33 ms intervals, 6 ms of work: a busy GPU or machine)
+  // must not climb, however long its work stays short.
+  feed(20, 20, 300);
+  const missStart = t.current, missClimb = feed(33.3, 6, 1800, true), missHeld = t.current === missStart;
+  const cam = v.camera.position, moved = Math.hypot(cam.x - eye[0], cam.y - eye[1], cam.z - eye[2]);
+  return {low, heavyHeld, climbed, climbAfterMs: climbAt === null ? null : climbAt - fastStart,
+    dropped, need, climbed2, climbAfter2Ms: climbAt2 === null ? null : climbAt2 - fast2,
+    missStart, missHeld, missClimbAt: missClimb, changes: log.length, cameraMoved: moved, log};
+}"""
+
+
+GOVERNOR_PARTIAL = """() => {
+  const v = window.__vc, t = v.tier, log = [];
+  let elapsed = 0;
+  function feed(count, work, pattern) {
+    for (let i = 0; i < count; i++) {
+      const ms = pattern && i % 16 === 15 ? 33.3 : 16.7, before = t.current; t.update(ms, work); elapsed += ms;
+      if (t.current !== before) { log.push({at: +elapsed.toFixed(1), before, after: t.current}); return elapsed; }
+    }
+    return null;
+  }
+  // Down to Tier 2 with slow frames, then 60 s at 60 Hz that misses one vsync in 16 (a 17.8 ms mean, under
+  // the 19 ms drop line, but a 33 ms p95) with 6 ms of work per frame: no climb. Then the same page at a
+  // clean 60 Hz climbs 10 to 13.5 s later, so the hold came from the misses.
+  for (let i = 0; i < 400 && t.current > 2; i++) { t.update(20, 20); elapsed += 20; }
+  const start = t.current, partialStart = elapsed, partialAt = feed(3600, 6, 1), afterPartial = t.current, slowShare = t.slowShare ?? null;
+  const cleanStart = elapsed, cleanAt = feed(1200, 6, 0), afterClean = t.current;
+  return {start, afterPartial, partialClimbAt: partialAt === null ? null : partialAt - partialStart, slowShare,
+    afterClean, cleanClimbAfterMs: cleanAt === null ? null : cleanAt - cleanStart, log};
+}"""
+
+
+def verify_governor_work(engine, url):
+    """C13.2 as fixed in V4a, driven with known frame spans on a fresh page: at a 60 Hz vsync cap
+    (16.7 ms intervals) 30 s of 14 ms work never climbs, 6 ms work climbs one tier 10 to 13.5 s after
+    the work mean goes under 12 ms, a drop within 10 s of a climb doubles the next climb's wait, 60 s
+    of short work at 33 ms intervals (a page still missing frames) never climbs, and none of the tier
+    changes moves the camera. On a second fresh page (V4 fix): 60 s that misses one frame in 16 (mean
+    17.8 ms, under the 19 ms drop line, p95 33 ms, over the C13.3 22 ms budget) never climbs from Tier 2,
+    and the same page at a clean 60 Hz then climbs 10 to 13.5 s later (positive control: the page with
+    the slow-share rule removed, renders/snap/wip/v4fix/controls.py, climbs during the misses)."""
+    engine.page.set_viewport_size({"width": 1440, "height": 900})
+    engine.goto(url)
+    engine.ready()
+    got = engine.evaluate(GOVERNOR_WORK)
+    engine.goto(url)
+    engine.ready()
+    got["partial"] = partial = engine.evaluate(GOVERNOR_PARTIAL)
+    checks = {
+        "governor climbs on frame work time at a 60 Hz vsync cap":
+            got["low"] == 1 and got["heavyHeld"] and got["climbed"] == 2 and
+            got["climbAfterMs"] is not None and 10000 <= got["climbAfterMs"] <= 13500,
+        "governor backs off after a climb that drops within 10 s":
+            got["dropped"] == 1 and got["need"] == 20000 and got["climbed2"] == 2 and
+            got["climbAfter2Ms"] is not None and got["climbAfter2Ms"] >= 20000,
+        "governor never climbs while frames miss the display rate":
+            got["missStart"] == 1 and got["missHeld"] and got["missClimbAt"] is None,
+        "a governor tier change never moves the camera":
+            got["changes"] >= 4 and got["cameraMoved"] < 1e-9,
+        GOVERNOR_PARTIAL_CHECK:
+            partial["start"] == 2 and partial["afterPartial"] == 2 and partial["partialClimbAt"] is None and
+            partial["afterClean"] == 3 and partial["cleanClimbAfterMs"] is not None and
+            10000 <= partial["cleanClimbAfterMs"] <= 13500,
+    }
+    return got, checks
+
+
+GOVERNOR_PARTIAL_CHECK = "governor never climbs while one frame in 16 misses the display rate"
+
+
 def self_test():
     times = list(range(0, 2000, 25))
     wave = [.05 if (stamp // 125) % 2 == 0 else .55 for stamp in times]
@@ -1097,7 +2031,8 @@ def self_test():
               "77 specified windows": len(large_traces) == 77,
               "V0 scenes": [s["id"] for s in SCENES if s["fromPhase"] <= 0] == ["S1", "S3", "S5"],
               "V2 adds stage only": [s["id"] for s in SCENES if s["fromPhase"] <= 2] == ["S1", "S2", "S3", "S5"],
-              "V3 scene set unchanged": [s["id"] for s in SCENES if s["fromPhase"] <= 3] == ["S1", "S2", "S3", "S5"]}
+              "V3 scene set unchanged": [s["id"] for s in SCENES if s["fromPhase"] <= 3] == ["S1", "S2", "S3", "S5"],
+              "V4 scene set unchanged": [s["id"] for s in SCENES if s["fromPhase"] <= 4] == ["S1", "S2", "S3", "S5"]}
     print(json.dumps(checks, indent=2))
     return int(not all(checks.values()))
 
@@ -1106,7 +2041,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--url", default="http://127.0.0.1:8765/viewer/")
     parser.add_argument("--prefix", default="world")
-    parser.add_argument("--phase", choices=("v0", "v1", "v2", "v3"), default="v0")
+    parser.add_argument("--phase", choices=("v0", "v1", "v2", "v3", "v4"), default="v0")
     parser.add_argument("--baseline", action="store_true", help="Measure legacy page; absent V0 capabilities fail")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
@@ -1190,6 +2125,12 @@ def main():
                     eng.evaluate("() => window.__vc.updateWeek(12)")
                     report["society"], society_checks = verify_society(eng, path)
                     checks.update(society_checks)
+                if phase >= 4:
+                    report["design"], design_checks = verify_design_v4()
+                    checks.update(design_checks)
+                    eng.evaluate("() => window.__vc.updateWeek(12)")
+                    report["roads"], roads_checks = verify_roads(eng)
+                    checks.update(roads_checks)
                 report["lightPolicy"], policy_checks = verify_light_policy(eng)
                 checks.update(policy_checks)
                 report["governor"] = verify_governor(eng, args.url)
@@ -1202,6 +2143,17 @@ def main():
                     governor["beforeTenSeconds"] == 1 and governor["recovered"] >= 2 and
                     all(row["fastSpanMs"] >= 10000 for row in governor["changes"]
                         if row["after"] > row["before"]))
+                if phase >= 4:
+                    report["governorWork"], work_checks = verify_governor_work(eng, args.url)
+                    checks.update(work_checks)
+                    report["bridges"], bridge_checks = verify_bridges(eng, args.url)
+                    checks.update(bridge_checks)
+                    report["traffic"], traffic_checks = verify_traffic(eng, args.url)
+                    checks.update(traffic_checks)
+                    report["reflow"], reflow_checks = verify_reflow(eng)
+                    checks.update(reflow_checks)
+                    report["deckClearance"], deck_checks = verify_deck_clearance(eng)
+                    checks.update(deck_checks)
                 if phase >= 1:
                     tier_rows = [governor["initialRave"]] + [row["rave"] for row in governor["changes"]]
                     checks["rave instance counts apply all three governor tiers"] = (
@@ -1240,6 +2192,20 @@ def main():
     if phase >= 3:
         for name in ("venue census 93 plus or minus 10 percent", "venue hosts valid", "venue state follows host", "vehicle census per type"):
             checks.setdefault(name, False)
+    if phase >= 4:
+        for name in ("roads.js rebuilds the tour and turn arcs from the page data", "surfaceAtRoad finds the tour's road height",
+                     "tour samples its entries' districts", "rim road drawn as its own open stretch",
+                     "governor climbs on frame work time at a 60 Hz vsync cap",
+                     "governor backs off after a climb that drops within 10 s",
+                     "governor never climbs while frames miss the display rate",
+                     "a governor tier change never moves the camera", GOVERNOR_PARTIAL_CHECK):
+            checks.setdefault(name, False)
+        for name in BRIDGE_CHECKS:
+            checks.setdefault(name, False)
+        for name in TRAFFIC_CHECKS + (REFLOW_CHECK, DECKS_CHECK):
+            checks.setdefault(name, False)
+        if not any(name.startswith("design: ") for name in checks):
+            checks["design: qa_design gates ran"] = False
     page = ROOT / "dist" / "index.html"
     report["publicBytes"] = page.stat().st_size if page.exists() else None
     checks["public page at most 900 KB"] = report["publicBytes"] is not None and report["publicBytes"] <= 900_000

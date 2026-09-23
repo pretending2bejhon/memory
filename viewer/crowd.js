@@ -123,10 +123,20 @@ const routeWeights=routes.map(r=>r.length),routeTotal=routeWeights.reduce((a,b)=
 // Weighted round-robin so any prefix of the walkers still covers every street.
 const walkerRoutes=[];{const credit=routes.map(()=>0);
   for(let i=0;i<WALKERS;i++){let best=0;for(let r=0;r<routes.length;r++){credit[r]+=routeWeights[r]/routeTotal;if(credit[r]>credit[best])best=r;}credit[best]-=1;walkerRoutes.push(best);}}
+// C3.4 from Run B: every eighth walker crosses a bridge (a roads.js walk path: ring sidewalk, fillet
+// corner, bridge sidewalk, far corner, far ring sidewalk, and back), so each tier's prefix keeps its
+// share; paths are dealt by length the same weighted way. The walkers' random draws are unchanged, so
+// everyone else is dressed and placed exactly as before; a bridge walker's outfit follows its bridge's
+// district through a separate stream.
+const bridgeWalks=roadNet&&roadNet.walkPaths||[],bridgeRnd=mulberry(4027),walkPathOf=[];
+{const total=bridgeWalks.reduce((a,p)=>a+p.length,0),credit=bridgeWalks.map(()=>0);
+  for(let i=0;i<WALKERS;i++){if(!bridgeWalks.length||i%8!==3){walkPathOf.push(-1);continue;}
+    let best=0;for(let k=0;k<bridgeWalks.length;k++){credit[k]+=bridgeWalks[k].length/total;if(credit[k]>credit[best])best=k;}credit[best]-=1;walkPathOf.push(best);}}
 for(let i=0;i<WALKERS;i++){
-  const route=routes[walkerRoutes[i]],relaxed=crowdRnd()<.3,stride=relaxed?.09+crowdRnd()*.03:.08+crowdRnd()*.03;
-  people.push({kind:0,district:route.district,route:walkerRoutes[i],distance:crowdRnd()*route.length,side:i%2?1:-1,relaxed,
-    speed:stride*(relaxed?1.1667:2.3333),offset:crowdRnd()*2,scale:.9+crowdRnd()*.22,energy:1,style:'walk',outfit:dress(route.district,crowdRnd)});
+  const route=routes[walkerRoutes[i]],relaxed=crowdRnd()<.3,stride=relaxed?.09+crowdRnd()*.03:.08+crowdRnd()*.03,path=walkPathOf[i]>=0?bridgeWalks[walkPathOf[i]]:null;
+  const distance=crowdRnd()*(path||route).length,offset=crowdRnd()*2,scale=.9+crowdRnd()*.22,outfit=dress(route.district,crowdRnd);
+  people.push({kind:0,district:path?path.district:route.district,route:walkerRoutes[i],path,distance,side:i%2?1:-1,relaxed,
+    speed:stride*(relaxed?1.1667:2.3333),offset,scale,energy:1,style:'walk',outfit:path?dress(path.district,bridgeRnd):outfit});
 }
 const STYLE_BY_ROOM={core:'nod',episodic:'skank',semantic:'twostep',procedural:'stomp',prospective:'handsup',working:'pump',
   jhon:'baile',prasma:'tight',branding:'robot',onebrain:'glitch',reef:'wave',inbox:'nod'};
@@ -202,7 +212,23 @@ for(const mesh of personMeshes){if(mesh.instanceColor)mesh.instanceColor.needsUp
 
 // ------------------------------------------------------------------ poses (C3.4 to C3.6)
 // One matrix writer: world = T(root) * Ry(yaw) * S(s) * T(joint) * Rz(b) * Rx(a) * S(part).
-function writePart(array,index,px,py,pz,cy,sy,s,jx,jy,jz,a,b,sx,syy,sz){
+// The per-frame loop writes a person's parts through writePose: the person's frame goes into WP once
+// (position, scale, the feet's and the upper body's yaw, the three heights, the leg stretch) and each part
+// is chosen by an integer kind, so no call passes a number that would be boxed (C13.4). A part's matrix
+// turns it by a about x and b about z at its joint (jx, jy, jz), scales it and turns the whole by the yaw.
+const WP=new Float64Array(11),WP_X=0,WP_Z=1,WP_S=2,WP_CY=3,WP_SY=4,WP_CU=5,WP_SU=6,WP_LEG=7,WP_BODY=8,WP_GROUND=9,WP_LEGS=10;
+const PART_LEG_A=0,PART_LEG_B=1,PART_HIPS=2,PART_TORSO=3,PART_ARM_A=4,PART_ARM_B=5,PART_HEAD=6,PART_HIP_ACC=7,PART_GROUND=8;
+function writePose(array,index,kind){
+  let py=WP[WP_BODY],cy=WP[WP_CU],sy=WP[WP_SU],jx=0,jy=0,a=0,b=0,syy=1;
+  if(kind===PART_LEG_A||kind===PART_LEG_B){py=WP[WP_LEG];cy=WP[WP_CY];sy=WP[WP_SY];jx=kind===PART_LEG_A?J.hipX:-J.hipX;jy=J.hipY-pose.dip;a=kind===PART_LEG_A?pose.lA:pose.lB;syy=WP[WP_LEGS];}
+  else if(kind===PART_HIPS){cy=WP[WP_CY];sy=WP[WP_SY];jy=J.hipY+.01;}
+  else if(kind===PART_TORSO){jy=J.torsoY;a=pose.lean;}
+  else if(kind===PART_ARM_A){jx=J.shoulderX;jy=J.shoulderY;a=pose.aA;b=pose.bA;}
+  else if(kind===PART_ARM_B){jx=-J.shoulderX;jy=J.shoulderY;a=pose.aB;b=pose.bB;}
+  else if(kind===PART_HEAD){jy=J.neckY;a=pose.nod;}
+  else if(kind===PART_HIP_ACC){cy=WP[WP_CY];sy=WP[WP_SY];jy=J.hipY+.03;}
+  else{py=WP[WP_GROUND];cy=WP[WP_CY];sy=WP[WP_SY];}
+  const px=WP[WP_X],pz=WP[WP_Z],s=WP[WP_S],jz=0,sx=1,sz=1;
   const o=index*16,ca=Math.cos(a),sa=Math.sin(a),cb=Math.cos(b),sb=Math.sin(b);
   const m00=cy*cb,m01=-cy*sb*ca+sy*sa,m02=cy*sb*sa+sy*ca,m10=sb,m11=cb*ca,m12=-cb*sa,m20=-sy*cb,m21=sy*sb*ca+cy*sa,m22=-sy*sb*sa+cy*ca;
   const kx=s*sx,ky=s*syy,kz=s*sz;
@@ -298,7 +324,8 @@ function updatePeople(dt,now){
     // Walkers keep walking every frame; far people refresh their pose less often.
     let px,py,pz,yaw;
     if(p.kind===0){
-      const route=routes[p.route],offset=Math.min(route.width/2+.04,route.clearance-.12);
+      // A bridge walk path already runs on its walking line; a ring walker keeps to its side's lane.
+      const route=p.path||routes[p.route],offset=p.path?0:Math.min(route.width/2+.04,route.clearance-.12);
       p.distance+=live?dt*p.speed*p.side:0;
       sampleRoute(route,p.distance,walkPoint,offset*p.side);
       const far=walkPoint.distanceToSquared(camWorld);
@@ -334,22 +361,23 @@ function updatePeople(dt,now){
     const s=p.scale,cy=Math.cos(yaw),sy=Math.sin(yaw),cu=Math.cos(yaw+pose.twist),su=Math.sin(yaw+pose.twist);
     px+=pose.sway*cy;pz-=pose.sway*sy;
     const lift=pose.jump,body=py+lift-pose.dip*s,legScale=(J.hipY-pose.dip)/J.hipY;
-    writePart(arrays.legA,i,px,py+lift,pz,cy,sy,s,J.hipX,J.hipY-pose.dip,0,pose.lA,0,1,legScale,1);
-    writePart(arrays.legB,i,px,py+lift,pz,cy,sy,s,-J.hipX,J.hipY-pose.dip,0,pose.lB,0,1,legScale,1);
-    writePart(arrays.hips,i,px,body,pz,cy,sy,s,0,J.hipY+.01,0,0,0,1,1,1);
-    writePart(arrays.torso,i,px,body,pz,cu,su,s,0,J.torsoY,0,pose.lean,0,1,1,1);
-    writePart(arrays.armA,i,px,body,pz,cu,su,s,J.shoulderX,J.shoulderY,0,pose.aA,pose.bA,1,1,1);
-    writePart(arrays.armB,i,px,body,pz,cu,su,s,-J.shoulderX,J.shoulderY,0,pose.aB,pose.bB,1,1,1);
-    writePart(arrays.head,i,px,body,pz,cu,su,s,0,J.neckY,0,pose.nod,0,1,1,1);
-    writePart(arrays.hair,i,px,body,pz,cu,su,s,0,J.neckY,0,pose.nod,0,1,1,1);
+    WP[WP_X]=px;WP[WP_Z]=pz;WP[WP_S]=s;WP[WP_CY]=cy;WP[WP_SY]=sy;WP[WP_CU]=cu;WP[WP_SU]=su;WP[WP_LEG]=py+lift;WP[WP_BODY]=body;WP[WP_GROUND]=py;WP[WP_LEGS]=legScale;
+    writePose(arrays.legA,i,PART_LEG_A);
+    writePose(arrays.legB,i,PART_LEG_B);
+    writePose(arrays.hips,i,PART_HIPS);
+    writePose(arrays.torso,i,PART_TORSO);
+    writePose(arrays.armA,i,PART_ARM_A);
+    writePose(arrays.armB,i,PART_ARM_B);
+    writePose(arrays.head,i,PART_HEAD);
+    writePose(arrays.hair,i,PART_HEAD);
     for(let k=0;k<p.acc.length;k++){
       const a=p.acc[k],arr=accessoryMeshes[a.name].instanceMatrix.array,at=ACCESSORY_ATTACH[a.name];
-      if(at==='head')writePart(arr,a.slot,px,body,pz,cu,su,s,0,J.neckY,0,pose.nod,0,1,1,1);
-      else if(at==='torso')writePart(arr,a.slot,px,body,pz,cu,su,s,0,J.torsoY,0,pose.lean,0,1,1,1);
-      else if(at==='hips')writePart(arr,a.slot,px,body,pz,cy,sy,s,0,J.hipY+.03,0,0,0,1,1,1);
-      else if(at==='armA')writePart(arr,a.slot,px,body,pz,cu,su,s,J.shoulderX,J.shoulderY,0,pose.aA,pose.bA,1,1,1);
-      else if(at==='arms'){writePart(arr,a.slot*2,px,body,pz,cu,su,s,J.shoulderX,J.shoulderY,0,pose.aA,pose.bA,1,1,1);writePart(arr,a.slot*2+1,px,body,pz,cu,su,s,-J.shoulderX,J.shoulderY,0,pose.aB,pose.bB,1,1,1);}
-      else writePart(arr,a.slot,px,py,pz,cy,sy,s,0,0,0,0,0,1,1,1);
+      if(at==='head')writePose(arr,a.slot,PART_HEAD);
+      else if(at==='torso')writePose(arr,a.slot,PART_TORSO);
+      else if(at==='hips')writePose(arr,a.slot,PART_HIP_ACC);
+      else if(at==='armA')writePose(arr,a.slot,PART_ARM_A);
+      else if(at==='arms'){writePose(arr,a.slot*2,PART_ARM_A);writePose(arr,a.slot*2+1,PART_ARM_B);}
+      else writePose(arr,a.slot,PART_GROUND);
     }
   }
   for(const mesh of personMeshes)mesh.instanceMatrix.needsUpdate=true;

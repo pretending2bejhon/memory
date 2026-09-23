@@ -843,6 +843,8 @@ roads.frustumCulled = false; roads.visible = false; scene.add(roads);
 
 __CITY_LIFE__
 
+__ROADS__
+
 __BEAT__
 
 __CITY_AUDIO__
@@ -852,6 +854,9 @@ const beat = createBeat(cityAudio);
 __RAVE_LIGHT__
 
 __SOCIETY__
+
+// The bridge light packets ride the beat through the Lights limiter (roads.js, C6.4).
+if (roadNet && roadNet.attachLights) roadNet.attachLights();
 
 __CROWD__
 
@@ -1095,11 +1100,16 @@ composer.addPass(bloom);
 composer.addPass(new OutputPass());
 let bloomOn = true;
 
-function resize() {
+// Render targets for the current size and tier. A governor tier change calls only this, so a tier
+// change never puts the camera back on the overview while someone is looking around.
+function renderScale() {
   const [w, h] = stageSize();
   renderer.setPixelRatio(tier.current===1?1:Math.min(window.devicePixelRatio,2));
   renderer.setSize(w, h); composer.setSize(w, h); bloom.setSize(tier.current<3?w/2:w,tier.current<3?h/2:h);
   camera.aspect = w / h; camera.updateProjectionMatrix();
+}
+function resize() {
+  renderScale();
   if (state.ride < 0 && state.isolate === null && !focusGoal) placeCamera();
 }
 window.addEventListener('resize', resize);
@@ -1111,17 +1121,22 @@ updateWeek(LAST);
 tier.apply();
 rave.update(0);
 const compilation = compileWorld();
-window.__vc = { rave, beat, lights, tier, crowd, venues, stages, compilation, scene, cityMat, placeCamera, flyTo, audio: cityAudio, setIsolate, carState, cars, nodes, kinds, edges, state, routes, sampleRoute, poseOnRoute, pointBlocked, clearSight, camera, controls, renderer, people, peopleGroup, startRide, stopRide, updateWeek };
+window.__vc = { rave, beat, lights, tier, crowd, venues, stages, roads: roadNet, compilation, scene, cityMat, placeCamera, flyTo, audio: cityAudio, setIsolate, carState, cars, nodes, kinds, edges, state, routes, sampleRoute, poseOnRoute, pointBlocked, clearSight, camera, controls, renderer, people, peopleGroup, startRide, stopRide, updateWeek };
 $('city-census').textContent = DATA.districts.length + ' districts / ' + nodes.length.toLocaleString() + ' addresses';
 $('loading').classList.add('ready');
+// C13.2: the governor climbs on the work a frame takes (this function, render included), measured
+// here and passed with the next frame's interval.
+let frameWorkMs = 0;
 function frame() {
   requestAnimationFrame(frame);
+  const workStart = performance.now();
   renderer.info.reset();
   const elapsed = clock.getDelta();
-  tier.update(elapsed*1000);
+  tier.update(elapsed*1000, frameWorkMs);
   beat.update(performance.now());
   lights.update(elapsed);
   rave.update(elapsed);
+  if (roadNet && roadNet.update) roadNet.update();
   const dt = Math.min(elapsed, 0.1);
   const now = clock.elapsedTime;
   if (state.playing) {
@@ -1146,6 +1161,7 @@ function frame() {
   cityMat.uniforms.uDressTime.value = reduced ? 0 : now;
   placeLabels();
   if (bloomOn) composer.render(); else renderer.render(scene, camera);
+  frameWorkMs = performance.now() - workStart;
 }
 frame();
 </script>

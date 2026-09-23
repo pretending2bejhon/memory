@@ -41,31 +41,50 @@ const lights = (() => {
   return api;
 })();
 
-// Three-second rolling mean without allocating a frame history on each frame.
+// C13.2 governor. Drop a tier when the mean frame interval passes 19 ms over 3 s; climb back one after
+// 10 s whose rolling 3 s mean frame WORK time (frame() itself, render call included, measured by the
+// page loop) stays under 12 ms. Intervals cannot show headroom on a vsync-capped display (16.7 ms at
+// 60 Hz), so a climb rule on intervals never fired and one stall pinned Tier 1 for good. The work time
+// cannot see the GPU or a busy machine, so a climb also needs the frames to keep the display's pace
+// (3 s mean interval under 18 ms) and to miss almost none (under 3 % of the window's intervals over
+// 20 ms): a page still missing frames at its tier never climbs, even when the misses are too sparse to
+// lift the mean (one in 16 frames at 33 ms is a 17.8 ms mean but a 33 ms p95, over the 22 ms budget of
+// C13.3, and the 19 ms drop rule would never take it back). When the
+// tier above is the one the GPU cannot hold, a drop within 10 s of a climb doubles the fast span the
+// next climb needs (up to 80 s; back to 10 s once a climb holds for a minute), so the governor cannot
+// ping-pong. Without a work time (the QA feeds only intervals) the interval stands in for it: the work
+// inside a frame never exceeds it. Rolling means, no allocation per frame. A tier change resizes the
+// render targets only (renderScale): it never moves the camera.
 const tier = (() => {
-  const times=new Float64Array(1024),values=new Float64Array(1024);
-  let current=phone?1:3,head=0,count=0,sum=0,clockMs=0,fastMs=0,changedAt=0;
+  const times=new Float64Array(1024),values=new Float64Array(1024),works=new Float64Array(1024);
+  const SLOW_MS=20,SLOW_SHARE=.03;
+  let current=phone?1:3,head=0,count=0,sum=0,workSum=0,slow=0,clockMs=0,fastMs=0,changedAt=0,climbedAt=-Infinity,climbNeedMs=10000;
   function apply(){
     crowd.applyTier(current);
     cars.mesh.count=vehicleCount();
-    resize();
+    renderScale();
   }
   const api={
     initial:phone?1:3,
     get current(){return current;},
     get meanMs(){return count?sum/count:0;},
+    get meanWorkMs(){return count?workSum/count:0;},
+    get slowShare(){return count?slow/count:0;},
     get settledForMs(){return clockMs-changedAt;},
-    update(ms){
+    get climbNeedMs(){return climbNeedMs;},
+    update(ms,workMs=ms){
       clockMs+=ms;
       while(count && (clockMs-times[head]>3000 || count===1024)){
-        sum-=values[head];head=(head+1)%1024;count--;
+        sum-=values[head];workSum-=works[head];if(values[head]>SLOW_MS)slow--;head=(head+1)%1024;count--;
       }
-      const slot=(head+count)%1024;times[slot]=clockMs;values[slot]=ms;sum+=ms;count++;
-      fastMs=api.meanMs<12?fastMs+ms:0;
+      const slot=(head+count)%1024;times[slot]=clockMs;values[slot]=ms;works[slot]=workMs;sum+=ms;workSum+=workMs;if(ms>SLOW_MS)slow++;count++;
+      fastMs=api.meanWorkMs<12&&api.meanMs<18&&slow<SLOW_SHARE*count?fastMs+ms:0;
+      if(climbNeedMs>10000&&changedAt===climbedAt&&clockMs-changedAt>=60000)climbNeedMs=10000;
       if(clockMs-changedAt>=3000 && clockMs-times[head]>=2900 && api.meanMs>19 && current>1){
+        if(clockMs-climbedAt<10000)climbNeedMs=Math.min(80000,climbNeedMs*2);
         current--;changedAt=clockMs;fastMs=0;apply();
-      } else if(fastMs>=10000 && current<3 && !phone){
-        current++;changedAt=clockMs;fastMs=0;apply();
+      } else if(fastMs>=climbNeedMs && current<3 && !phone){
+        current++;changedAt=clockMs;climbedAt=clockMs;fastMs=0;apply();
       }
     },
     apply
