@@ -46,8 +46,7 @@ const tier = (() => {
   const times=new Float64Array(1024),values=new Float64Array(1024);
   let current=phone?1:3,head=0,count=0,sum=0,clockMs=0,fastMs=0,changedAt=0;
   function apply(){
-    const count=current===3?PEOPLE:current===2?Math.round(PEOPLE*.6):Math.min(220,PEOPLE);
-    for(const mesh of personMeshes) mesh.count=count;
+    crowd.applyTier(current);
     cars.mesh.count=Math.min(current===3?CARS:current===2?Math.round(CARS*.6):70,Math.max(12,Math.round(24+validEdges.length/18)));
     resize();
   }
@@ -178,8 +177,8 @@ const rave = (() => {
         float az=atan(d.z,d.x),ribbon=sin(az*5.0+sin(az*2.0+uTime*.033)*2.0+uTime*.012);
         float aurora=exp(-pow((h-.29-ribbon*.10)*17.0,2.0))*(.4+.6*noise(vec2(az*6.0,h*11.0+uTime*.04)));
         vec3 base=mix(uNight,vec3(.005,.009,.021),smoothstep(0.0,.75,h));
-        vec3 glow=paint*horizon*(.026+uKick*.07+uRiser*.022)+paint*deck*(.025+uFlash*.12);
-        glow+=accent*aurora*(.016+uPad*.055+uStab*.035);
+        vec3 glow=paint*horizon*(.075+uKick*.07+uRiser*.03)+paint*deck*(.065+uFlash*.12);
+        glow+=accent*aurora*(.05+uPad*.06+uStab*.04);
         vec3 c=(base+glow*uEnergy*uSourceIntensity)*uCut*ceiling+uNight*(1.0-ceiling);
         gl_FragColor=vec4(c,1.0);
         #include <colorspace_fragment>
@@ -204,7 +203,7 @@ const rave = (() => {
       float line(vec2 p){vec2 w=max(fwidth(p),vec2(.001));vec2 g=abs(fract(p-.5)-.5)/w;return 1.0-min(min(g.x,g.y),1.0);}
       void main(){vec2 p=vWorld.xz;float minor=line(p),major=line(p/8.0),rings=0.0;
         for(int i=0;i<16;i++){float age=uClock-uRipples[i].z;float radius=age*20.0;float active=step(0.0,age)*step(age,1.5);float ring=exp(-pow((length(p-uRipples[i].xy)-radius)*1.7,2.0));rings+=ring*active*(1.0-age/1.5)*uRipples[i].w;}
-        vec3 c=uNight*.65+uColor*((minor*.012+major*.031)*(.35+uEnergy)+rings*(.085+uBass*.025)*uEnergy*uSourceIntensity)*uCut;
+        vec3 c=uNight*.65+uColor*((minor*.028+major*.075)*(.35+uEnergy)+rings*(.2+uBass*.04)*uEnergy*uSourceIntensity)*uCut;
         gl_FragColor=vec4(c,1.0);
         #include <colorspace_fragment>
       }`
@@ -338,7 +337,7 @@ const rave = (() => {
   const screens=new THREE.InstancedMesh(screenGeometry,new THREE.ShaderMaterial({uniforms:screenUniforms,side:THREE.DoubleSide,forceSinglePass:true,
     vertexShader:`attribute float aMode,aCell;varying vec2 vUV;varying float vMode,vCell;void main(){vUV=uv;vMode=aMode;vCell=aCell;gl_Position=projectionMatrix*modelViewMatrix*instanceMatrix*vec4(position,1.0);}`,
     fragmentShader:`varying vec2 vUV;varying float vMode,vCell;uniform vec3 uColor,uAccent;uniform float uTime,uEnergy,uSourceIntensity,uCut,uHat,uClap,uBeat,uWeek;uniform float uSpectrum[16],uWave[32];uniform sampler2D uAtlas;
-      void main(){vec2 uv=vUV,p=uv-.5;float figure=0.0;vec3 paint=uColor;
+      void main(){if(!gl_FrontFacing){gl_FragColor=vec4(vec3(.012,.015,.02)*uCut,1.0);return;}vec2 uv=vUV,p=uv-.5;float figure=0.0;vec3 paint=uColor;
         if(vMode<.5){int bin=int(min(15.0,floor(uv.x*16.0)));float height=.10+uSpectrum[bin]*.77;figure=step(uv.y,height)*step(.13,fract(uv.x*16.0));paint=mix(uColor,uAccent,uv.y);}
         else if(vMode<1.5){float angle=atan(p.y,p.x)/6.2831853+.5;int bin=int(min(31.0,floor(angle*32.0)));float radius=.26+uWave[bin]*.075;figure=1.0-smoothstep(.012,.030,abs(length(p)-radius));figure+=.18*(1.0-smoothstep(.03,.045,abs(length(p)-.38)));}
         else if(vMode<2.5){float a=atan(p.y,p.x),r=length(p);float fold=abs(mod(a+uTime*.12,.785398)-.392699);figure=pow(max(0.0,sin(r*37.0+fold*18.0-uBeat*.5)),10.0)*(.4+uSpectrum[3]*.6);paint=mix(uColor,uAccent,sin(a*4.0)*.5+.5);}

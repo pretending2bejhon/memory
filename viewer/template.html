@@ -658,10 +658,6 @@ roads.frustumCulled = false; roads.visible = false; scene.add(roads);
 
 __CITY_LIFE__
 
-__SOCIETY__
-
-__CROWD__
-
 __BEAT__
 
 __CITY_AUDIO__
@@ -669,6 +665,10 @@ __CITY_AUDIO__
 const beat = createBeat(cityAudio);
 
 __RAVE_LIGHT__
+
+__SOCIETY__
+
+__CROWD__
 
 // ------------------------------------------------------------------ state + week update
 const state = { t: LAST, playing: false, isolate: null, hover: -1, selected: -1, ride: -1 };
@@ -701,6 +701,7 @@ function updateWeek(t) {
     stats.brightness = stats.existing ? stats.lit / stats.existing : 0;
   }
   cityAudio.setTimeline(districtAudio);
+  crowd.setTimeline(districtAudio);
   for (const set of Object.values(kinds)) { set.mesh.instanceMatrix.needsUpdate = true; for (const at of ['body', 'light', 'lit', 'dim']) set.attrs[at].needsUpdate = true; }
   const colAttr = roadGeo.getAttribute('color');
   validEdges = [];
@@ -918,7 +919,7 @@ updateWeek(LAST);
 tier.apply();
 rave.update(0);
 const compilation = compileWorld();
-window.__vc = { rave, beat, lights, tier, crowd, venues, compilation, scene, cityMat, placeCamera, flyTo, audio: cityAudio, setIsolate, carState, cars, nodes, kinds, edges, state, routes, sampleRoute, poseOnRoute, pointBlocked, clearSight, camera, controls, renderer, people, peopleGroup, startRide, stopRide, updateWeek };
+window.__vc = { rave, beat, lights, tier, crowd, venues, stages, compilation, scene, cityMat, placeCamera, flyTo, audio: cityAudio, setIsolate, carState, cars, nodes, kinds, edges, state, routes, sampleRoute, poseOnRoute, pointBlocked, clearSight, camera, controls, renderer, people, peopleGroup, startRide, stopRide, updateWeek };
 $('city-census').textContent = DATA.districts.length + ' districts / ' + nodes.length.toLocaleString() + ' addresses';
 $('loading').classList.add('ready');
 function frame() {
@@ -942,6 +943,7 @@ function frame() {
   }
   updateCars(reduced ? 0 : dt);
   updatePeople(reduced ? 0 : dt, now);
+  updateStages();
   updateAtmosphere(reduced ? 0 : now);
   craneNodes.forEach((n, k) => { dummy.position.copy(n.craneBase); dummy.rotation.set(0, (reduced ? 0 : now * 0.12) + k * 1.3, 0); dummy.scale.set(1, n.state === 'absent' ? 0.0001 : n.h + 1.4, 1); dummy.updateMatrix(); cranes.mesh.setMatrixAt(k, dummy.matrix); });
   cranes.mesh.instanceMatrix.needsUpdate = true;

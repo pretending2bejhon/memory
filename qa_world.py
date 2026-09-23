@@ -725,6 +725,54 @@ def measure_rave_dynamics(engine, path):
     return value, checks
 
 
+def verify_crowd(engine, path):
+    """V2 gates: census per tier, dancers follow the timeline formula, nobody inside a footprint,
+    bounce minima locked to each dancer's own beat within a sixteenth."""
+    result = engine.evaluate("""() => {
+      const v=window.__vc,c=v.crowd,caps={3:[400,480],2:[240,288],1:[100,108]},tiers={};
+      for(const level of [3,2,1]){c.applyTier(level);const n=c.census();
+        const cap=caps[level];tiers[level]={walkers:n.walkers,dancers:n.dancers,djs:n.djs,
+          pass:n.walkers===cap[0]&&n.dancers<=cap[1]+12&&n.djs===12};}
+      c.applyTier(v.tier.current);
+      const formula=week=>{v.updateWeek(week);const stats=v.audio.timeline,n=c.census();let total=0;
+        const targets=c.stages.map(s=>{const st=stats[s.district]||{density:0,brightness:0};const t=s.capacity*st.density*(.25+.75*st.brightness);total+=t;return t;});
+        const scale=total>c.state.dancerCap?c.state.dancerCap/total:1;
+        const rows=c.stages.map((s,i)=>({district:s.district,visible:n.perStage[i].visible,expected:Math.min(c.stageSlots[i].length,Math.round(targets[i]*scale))}));
+        return {week,total:n.dancers,rows,pass:rows.every(r=>r.visible===r.expected)};};
+      const week0=formula(0),week12=formula(12);
+      return {tiers,week0,week12};
+    }""")
+    engine.wait(1.5)
+    inside = engine.evaluate("""() => {
+      const v=window.__vc,c=v.crowd,arr=c.parts.hips.instanceMatrix.array,p=new v.camera.position.constructor();let checked=0;const bad=[];
+      c.people.forEach((person,i)=>{if(!c.isVisible(i,person))return;const o=i*16;if(arr[o+15]!==1)return;
+        p.set(arr[o+12],arr[o+13]+.05,arr[o+14]);checked++;if(v.pointBlocked(p,.07,true))bad.push({i,kind:person.kind,district:person.district});});
+      return {checked,inside:bad.length,sample:bad.slice(0,10)};
+    }""")
+    bounce = engine.evaluate("""() => new Promise(resolve => {
+      const v=window.__vc,c=v.crowd,arr=c.parts.hips.instanceMatrix.array,st=c.stages.find(s=>s.district==='working');
+      // Close to the camera, so the sampled dancers refresh every frame (no distance LOD).
+      v.camera.position.set(st.center.x,st.center.y+1.2,st.center.z+3);v.controls.target.copy(st.center);v.controls.update();
+      const picks=c.people.map((p,i)=>[p,i]).filter(([p,i])=>p.kind===1&&p.district==='working'&&c.isVisible(i,p)&&(p.style==='bounce'||p.style==='pump')).slice(0,6);
+      const traces=picks.map(()=>[]);let frames=0;
+      function tick(){const b=v.beat.now().totalBeats;picks.forEach(([p,i],k)=>traces[k].push([b+p.offset,arr[i*16+13]]));
+        if(++frames<150)requestAnimationFrame(tick);else{
+          const rows=picks.map(([p,i],k)=>{const t=traces[k],minima=[];
+            for(let j=5;j<t.length-5;j++){let low=true,strict=false;for(let k=j-4;k<=j+4;k++){if(k===j)continue;if(t[k][1]<t[j][1])low=false;if(t[k][1]>t[j][1])strict=true;}
+              if(low&&strict&&(!minima.length||t[j][0]-minima[minima.length-1]>.5))minima.push(t[j][0]);}
+            const err=minima.map(m=>Math.abs(m-Math.round(m)));return {style:p.style,offset:p.offset,minima:minima.length,maxError:Math.max(0,...err)};});
+          resolve({rows,pass:rows.length>0&&rows.every(r=>r.minima>=3&&r.maxError<=1/16&&Math.abs(r.offset)<=1/16)});}}
+      requestAnimationFrame(tick);
+    })""")
+    report = {"census": result, "inside": inside, "bounce": bounce}
+    path("world-crowd.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+    checks = {"people census per tier": all(row["pass"] for row in result["tiers"].values()),
+              "dancers follow density and brightness": result["week0"]["pass"] and result["week12"]["pass"] and result["week12"]["total"] > result["week0"]["total"],
+              "no person inside a footprint": inside["checked"] > 0 and inside["inside"] == 0,
+              "bounce minima within a sixteenth": bounce["pass"]}
+    return report, checks
+
+
 def verify_rave_reduced(engine, path):
     """Compare actual motion buffers across a reduced-motion silent transition."""
     engine.evaluate("""() => {
@@ -976,6 +1024,10 @@ def main():
                     checks["window light invariant sound off"] = report["transitions"][1]["buffersPass"]
                     report["raveDynamics"], dynamics_checks = measure_rave_dynamics(eng, path)
                     checks.update(dynamics_checks)
+                if phase >= 2:
+                    eng.evaluate("() => window.__vc.updateWeek(12)")
+                    report["crowd"], crowd_checks = verify_crowd(eng, path)
+                    checks.update(crowd_checks)
                 report["lightPolicy"], policy_checks = verify_light_policy(eng)
                 checks.update(policy_checks)
                 report["governor"] = verify_governor(eng, args.url)
