@@ -68,13 +68,20 @@ dashMatrices.forEach((m,i)=>dashes.setMatrixAt(i,m));streetGroup.add(dashes);
 const obstacles = nodes.map(n=>({n,minX:n.x-n.w*.57,maxX:n.x+n.w*.57,minZ:-n.y-n.d*.57,maxZ:-n.y+n.d*.57}));
 const obstacleGrid=new Map();
 for(const b of obstacles) for(let x=Math.floor((b.minX-.3)/2);x<=Math.floor((b.maxX+.3)/2);x++) for(let z=Math.floor((b.minZ-.3)/2);z<=Math.floor((b.maxZ+.3)/2);z++) {
-  const key=x+','+z;if(!obstacleGrid.has(key))obstacleGrid.set(key,[]);obstacleGrid.get(key).push(b);
+  const key=x*65536+z;if(!obstacleGrid.has(key))obstacleGrid.set(key,[]);obstacleGrid.get(key).push(b);
 }
 function pointBlocked(p, radius=.14, useTimeline=true) {
-  return (obstacleGrid.get(Math.floor(p.x/2)+','+Math.floor(p.z/2))||[]).some(b=>(!useTimeline||b.n.state!=='absent') && p.y < plateauZ(b.n.district)+b.n.h*(useTimeline?b.n.rise:1)*1.08+.14 && p.y>plateauZ(b.n.district)-.1 && p.x>b.minX-radius&&p.x<b.maxX+radius&&p.z>b.minZ-radius&&p.z<b.maxZ+radius);
+  const cells=obstacleGrid.get(Math.floor(p.x/2)*65536+Math.floor(p.z/2));
+  if(!cells) return false;
+  for(let i=0;i<cells.length;i++) {
+    const b=cells[i];
+    if((!useTimeline||b.n.state!=='absent') && p.y < plateauZ(b.n.district)+b.n.h*(useTimeline?b.n.rise:1)*1.08+.14 && p.y>plateauZ(b.n.district)-.1 && p.x>b.minX-radius&&p.x<b.maxX+radius&&p.z>b.minZ-radius&&p.z<b.maxZ+radius) return true;
+  }
+  return false;
 }
+const sightPoint=new THREE.Vector3();
 function clearSight(a,b) {
-  const length=a.distanceTo(b),p=new THREE.Vector3();
+  const length=a.distanceTo(b),p=sightPoint;
   for(let s=.1;s<length;s+=.12) if(pointBlocked(p.lerpVectors(a,b,s/length),.08)) return false;
   return true;
 }
@@ -99,65 +106,8 @@ boulevardLamps.mesh.instanceMatrix.needsUpdate=true;
 // Existing archive lamps were on the lane center. The new lights sit on sidewalks.
 lamps.mesh.visible=false;
 
-// Traffic stays on navigable streets, with two lanes and measured travel distance.
-const CARS = phone?58:118;
-const cars=instanced('car',CARS),carState=[],carRnd=mulberry(4242);
 const hidden=new THREE.Matrix4().makeScale(.0001,.0001,.0001);
-for(let k=0;k<CARS;k++) {
-  const route=routes[k%routes.length];
-  carState.push({route:k%routes.length,distance:carRnd()*route.length,dir:k%2?1:-1,speed:.75+carRnd()*.8,on:true,pos:new THREE.Vector3(),heading:new THREE.Vector3()});
-  staticSet(cars,k,new THREE.Vector3(0,-50,0),[.15,.13,.34],0,hex(k%4===0?'#826850':'#3b5264'),WHITE,carRnd());
-}
 let validEdges=[];
-function updateCars(dt) {
-  const p=new THREE.Vector3(),q=new THREE.Vector3();
-  for(let k=0;k<CARS;k++) {
-    const c=carState[k],route=routes[c.route];c.distance+=dt*c.speed*c.dir;
-    sampleRoute(route,c.distance,p,.12*c.dir);sampleRoute(route,c.distance+.2*c.dir,q,.12*c.dir);
-    c.pos.copy(p);c.heading.subVectors(q,p).normalize();c.on=k<cars.mesh.count;
-    dummy.position.copy(p);dummy.position.y+=.028;dummy.rotation.set(0,Math.atan2(c.heading.x,c.heading.z),0);dummy.scale.set(.15,.13,.34);dummy.updateMatrix();
-    cars.mesh.setMatrixAt(k,c.on?dummy.matrix:hidden);
-  }
-  cars.mesh.instanceMatrix.needsUpdate=true;
-}
-
-// Low-poly citizens: instanced coats, heads and independently swinging limbs.
-const peopleGroup=new THREE.Group();scene.add(peopleGroup);
-const PEOPLE=phone?100:260;
-const personParts={};
-for(const [name,geo,color] of [
-  ['body',new THREE.BoxGeometry(.10,.145,.065),'#538899'],
-  ['head',new THREE.SphereGeometry(.038,7,5),'#c7a48f'],
-  ['leftLeg',new THREE.BoxGeometry(.033,.13,.04),'#48586d'],
-  ['rightLeg',new THREE.BoxGeometry(.033,.13,.04),'#48586d'],
-  ['leftArm',new THREE.BoxGeometry(.026,.13,.036),'#668da0'],
-  ['rightArm',new THREE.BoxGeometry(.026,.13,.036),'#668da0']]) {
-  const mesh=new THREE.InstancedMesh(geo,new THREE.MeshBasicMaterial({color:col(hex(color))}),PEOPLE);mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);mesh.frustumCulled=false;personParts[name]=mesh;peopleGroup.add(mesh);
-}
-const crowdRnd=mulberry(811),people=[];
-for(let i=0;i<PEOPLE;i++) {
-  const route=routes[i%routes.length],side=i%2?1:-1;
-  people.push({route:i%routes.length,distance:crowdRnd()*route.length,speed:.18+crowdRnd()*.16,side,phase:crowdRnd()*Math.PI*2});
-  const coat=new THREE.Color(['#a9b7c3','#d98388','#5fbeb5','#8b80b7','#d9b573'][i%5]);
-  for(const name of ['body','leftArm','rightArm']) personParts[name].setColorAt(i,coat);
-}
-const pRoot=new THREE.Object3D(),pLimb=new THREE.Object3D(),pMatrix=new THREE.Matrix4();
-function updatePeople(dt,now) {
-  if(!peopleGroup.visible) return;
-  const p=new THREE.Vector3(),q=new THREE.Vector3();
-  people.forEach((person,i)=>{
-    const route=routes[person.route],offset=Math.min(route.width/2+.04,route.clearance-.12);
-    person.distance+=dt*person.speed*person.side;
-    sampleRoute(route,person.distance,p,offset*person.side);sampleRoute(route,person.distance+.15*person.side,q,offset*person.side);
-    pRoot.position.copy(p);pRoot.position.y+=.045;pRoot.rotation.set(0,Math.atan2(q.x-p.x,q.z-p.z),0);pRoot.updateMatrix();
-    const blocked=pointBlocked(new THREE.Vector3(p.x,p.y+.18,p.z),.07);
-    const gait=reduced?0:Math.sin(now*person.speed*18+person.phase)*.48;
-    for(const [name,x,y,swing] of [['body',0,.195,0],['head',0,.305,0],['leftLeg',-.026,.065,gait],['rightLeg',.026,.065,-gait],['leftArm',-.067,.19,-gait],['rightArm',.067,.19,gait]]) {
-      pLimb.position.set(x,y,0);pLimb.rotation.set(swing,0,0);pLimb.updateMatrix();pMatrix.multiplyMatrices(pRoot.matrix,pLimb.matrix);personParts[name].setMatrixAt(i,blocked?hidden:pMatrix);
-    }
-  });
-  Object.values(personParts).forEach(m=>m.instanceMatrix.needsUpdate=true);
-}
 
 // Projecting signs are actual street addresses and places, painted into local textures.
 const signGroup=new THREE.Group();scene.add(signGroup);const signs=[],signMaterials=new Map();
@@ -208,7 +158,7 @@ function updateAtmosphere(now) {
   rain.material.opacity=state.ride>=0?.2:.045;
   if(rain.visible) {
     const anchor=state.ride>=0?camera.position:controls.target;
-    rainSeeds.forEach((s,i)=>{const y=(s[1]-(now*7)%24+24)%24;
-      rainPositions.set([anchor.x+s[0],y,anchor.z+s[2],anchor.x+s[0]-.045,y+.32,anchor.z+s[2]+.025],i*6);});rainGeo.attributes.position.needsUpdate=true;
+    for(let i=0;i<rainSeeds.length;i++) {const s=rainSeeds[i],y=(s[1]-(now*7)%24+24)%24;
+      const k=i*6;rainPositions[k]=anchor.x+s[0];rainPositions[k+1]=y;rainPositions[k+2]=anchor.z+s[2];rainPositions[k+3]=anchor.x+s[0]-.045;rainPositions[k+4]=y+.32;rainPositions[k+5]=anchor.z+s[2]+.025;}rainGeo.attributes.position.needsUpdate=true;
   }
 }

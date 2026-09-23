@@ -171,6 +171,7 @@
       <label class="switch"><input type="checkbox" id="t-bloom" checked> glow</label>
       <label class="switch"><input type="checkbox" id="t-orbit"> slow orbit</label>
       <label class="switch"><input type="checkbox" id="t-stars" checked> stars</label>
+      <label class="switch" for="lights-setting">Lights <select id="lights-setting" aria-label="Lights"><option>Full</option><option>Soft</option><option>Calm</option></select></label>
       <button class="btn" id="reset-cam" type="button">Reset view</button>
     </div>
   </div>
@@ -682,7 +683,17 @@ roads.frustumCulled = false; roads.visible = false; scene.add(roads);
 
 __CITY_LIFE__
 
+__SOCIETY__
+
+__CROWD__
+
+__BEAT__
+
 __CITY_AUDIO__
+
+const beat = createBeat(cityAudio);
+
+__RAVE_LIGHT__
 
 // ------------------------------------------------------------------ state + week update
 const state = { t: LAST, playing: false, isolate: null, hover: -1, selected: -1, ride: -1 };
@@ -733,7 +744,7 @@ function updateWeek(t) {
   antennas.mesh.instanceMatrix.needsUpdate = true;
   chimneyNodes.forEach((n, k) => { dummy.position.copy(n.chimneyBase); dummy.rotation.set(0, 0, 0); dummy.scale.set(0.2, Math.max(0.0001, n.h * 1.9 * n.rise), 0.2); dummy.updateMatrix(); chimneys.mesh.setMatrixAt(k, dummy.matrix); });
   chimneys.mesh.instanceMatrix.needsUpdate = true;
-  cars.mesh.count = Math.min(CARS, Math.max(12, Math.round(24 + validEdges.length / 18)));
+  cars.mesh.count = Math.min(tier.current===3?CARS:tier.current===2?Math.round(CARS*.6):70, Math.max(12, Math.round(24 + validEdges.length / 18)));
   updateSigns();
   renderTime();
 }
@@ -918,7 +929,8 @@ let bloomOn = true;
 
 function resize() {
   const [w, h] = stageSize();
-  renderer.setSize(w, h); composer.setSize(w, h); bloom.resolution.set(w, h);
+  renderer.setPixelRatio(tier.current===1?1:Math.min(window.devicePixelRatio,2));
+  renderer.setSize(w, h); composer.setSize(w, h); bloom.setSize(tier.current<3?w/2:w,tier.current<3?h/2:h);
   camera.aspect = w / h; camera.updateProjectionMatrix();
   if (state.ride < 0 && state.isolate === null && !focusGoal) placeCamera();
 }
@@ -928,13 +940,19 @@ resize();
 
 const clock = new THREE.Clock();
 updateWeek(LAST);
-window.__vc = { audio: cityAudio, setIsolate, carState, cars, nodes, kinds, edges, state, routes, sampleRoute, poseOnRoute, pointBlocked, clearSight, camera, controls, renderer, people, peopleGroup, startRide, stopRide, updateWeek };
+tier.apply();
+const compilation = compileWorld();
+window.__vc = { beat, lights, tier, crowd, venues, compilation, scene, cityMat, placeCamera, flyTo, audio: cityAudio, setIsolate, carState, cars, nodes, kinds, edges, state, routes, sampleRoute, poseOnRoute, pointBlocked, clearSight, camera, controls, renderer, people, peopleGroup, startRide, stopRide, updateWeek };
 $('city-census').textContent = DATA.districts.length + ' districts / ' + nodes.length.toLocaleString() + ' addresses';
 $('loading').classList.add('ready');
 function frame() {
   requestAnimationFrame(frame);
   renderer.info.reset();
-  const dt = Math.min(clock.getDelta(), 0.1);
+  const elapsed = clock.getDelta();
+  tier.update(elapsed*1000);
+  beat.update(performance.now());
+  lights.update(elapsed);
+  const dt = Math.min(elapsed, 0.1);
   const now = clock.elapsedTime;
   if (state.playing) {
     const t = Math.min(LAST, state.t + dt * (reduced ? 0.6 : 1.1));

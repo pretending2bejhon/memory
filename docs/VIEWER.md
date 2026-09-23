@@ -12,6 +12,7 @@ The viewer is a full-screen night city built from the anonymous vault export. Ta
 | Leave ride / Esc | Restore the previous overview position, lens and orbit settings |
 | Timeline / Play | Scrub or play the 13 weekly building states |
 | View | Traffic, people, rain, knowledge links, labels, glow, orbit and stars |
+| Lights in View | Full, Soft or Calm; reduced motion forces Calm |
 | Sound / M | Turn the room music on or off; the Sound chip sits beside View |
 | Click a building | Inspect its anonymous type and state |
 
@@ -56,7 +57,11 @@ The room's timeline low-pass target is `600 + brightness * 11400` Hz, and its re
 
 - `design.py`: deterministic building dimensions/forms and clearance-checked routes shared with Blender.
 - `viewer/template.html`: interface, materials, geometry, timeline and interaction.
-- `viewer/city-life.js`: streets, instanced traffic/citizens, signs, wet pavement and atmosphere.
+- `viewer/city-life.js`: streets, signs, wet pavement and atmosphere.
+- `viewer/crowd.js`: instanced citizens.
+- `viewer/society.js`: instanced traffic and society.
+- `viewer/beat.js`: the shared drop function, audible visual clock and preallocated hit-ring reader.
+- `viewer/rave-light.js`: the common light limiter, Lights setting and adaptive quality governor.
 - `viewer/ride.js`: ride camera, sightline checks and saved overview state.
 - `viewer/city-audio.js`: audio-clock scheduler, Strudel loading and compilation, orbit routing, room buses, transitions and Sound preference.
 - `viewer/rooms/*.strudel`: the twelve rooms as Strudel code.
@@ -66,11 +71,11 @@ Run `python viewer/build.py` after editing for private local inspection, or `pyt
 
 The builder replaces `__CITY_AUDIO__` in the template with `city-audio.js`, just as it inlines street life and the ride camera, then replaces `__CITY_ROOMS__` with the room files as a JSON map.
 
-The viewer uses three.js 0.170 from jsDelivr and fonts from Google Fonts; it needs network access to those resources. These are the only external runtime loads.
+The viewer uses three.js 0.170 from jsDelivr and fonts from Google Fonts; it needs network access to those resources. Sound additionally loads Strudel and its samples from the sources listed above, only after a deliberate gesture. No new external sources are added for visual scenery.
 
 ## Verification
 
-`qa_city.py` uses a project-local browser harness directly, without reading the vault or relying on a vault-owned browser wrapper. Start `python -m http.server 8765 --bind 127.0.0.1`, then run `python qa_city.py`. Screenshots and machine-readable results go to `renders/qa/`. Run the same harness against `/dist/` with `--url`; it must report 1,246 nodes and zero page errors, with desktop and 375 px screenshots.
+`qa_city.py` uses a project-local browser harness directly, without reading the vault or relying on a vault-owned browser wrapper. Start `python -m http.server 8765 --bind 127.0.0.1`, then run `py -V:Astral/CPython3.11.15 qa_city.py --prefix local`. The browser harness requires this Python 3.11 runtime. Screenshots and machine-readable results go to `renders/qa/`. Run the same harness against `/dist/` with `--url`; it must report 1,246 nodes and zero page errors, with desktop and 375 px screenshots.
 
 The checks sample every route at 0.1-unit intervals for raw camera clearance, final camera clearance, look-ahead occlusion, and both walking lanes. They also exercise entering/exiting rides, district focus, timeline changes, and a fresh mobile page. `window.__vc` exposes the scene state and route helpers for inspection.
 
@@ -81,3 +86,15 @@ The twelve-room gate selects each room, waits for the transition to reach its dr
 [LOG.md](../LOG.md) contains twelve listening prompts with empty score cells. The owner scores the rooms after deployment; collecting those subjective scores is not part of the local automated gate.
 
 `window.__vc.audio` exposes `ctx`, `setRoom`, `room`, `analyser` and `rooms` for inspection. The context is absent before the first Sound gesture; selecting a room through the API does not bypass that gesture requirement.
+
+## Visual foundations
+
+The visual beat bus follows the audible audio clock when Sound is on and free-runs at 140 BPM when it is off. Audio scheduling remains independent of rendering. Source changes absorb the phase error over one bar. Windows and street lamps never subscribe to this bus.
+
+Lights offers Full, Soft and Calm in View, defaults to Full and remembers the choice under `vc-lights`. Full uses each effect's specified amplitude. Soft halves reactive amplitudes, dims a transition cut to 50 percent and disables strobes. Calm uses 20 percent amplitude, disables flashes, blackout and strobes, and takes at least one bar for colour changes. Overview and district focus apply an additional 0.6 factor; a ride applies 1.0. Reduced motion forces Calm and freezes ambient movement. The shared limiter caps beat pulses below the general-flash threshold and limits large flashes to three in any second.
+
+Desktop starts at Tier 3 and phones at Tier 1. A three-second mean above 19 ms drops one tier. Ten seconds below 12 ms restores one tier, with phones remaining at Tier 1. All materials, including hidden scenery and postprocessing, compile before the loading screen leaves.
+
+`qa_world.py --phase v0` measures the scenes available in that phase: week-12 overview, the existing Lantern avenue ride, and an overview focus transition. A five-minute scripted session visits every district, plays the timeline and rides for 60 seconds to measure heap growth. From V2 it also measures the Downtown stage. Future bridge, bike and lake scenes are explicitly deferred to their Run B phases. Each scene reports the governor's settled tier; desktop may settle at Tier 2 but not Tier 1. Flash checks use means over 21 by 12 cells, moved in four-cell steps over a 64 by 36 relative-luminance trace, across each existing mode and Lights setting.
+
+The world budgets apply from V0: at least 55 fps, p95 frame time at most 22 ms, no frame above 100 ms after load, at most 320 draw calls and 1.5 million triangles, at most 40 MB heap growth in the scripted session, and at most 900,000 bytes for the public page. Run the browser suites with the Python 3.11 launcher above; the complete audio command includes `qa_audio.py --phase p2`, and the world command includes the current `--phase v<n>`. All existing city gates and all 36 audio checks stay binding.

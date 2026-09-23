@@ -30,8 +30,8 @@ def main():
     print(f'git ls-files: {len(tracked)} tracked paths; prohibited .blend/.mp4/.env paths = {prohibited}')
     assert not prohibited
     size = page.stat().st_size
-    print(f'dist/index.html: {size} bytes < 1000000 = {size < 1_000_000}')
-    assert size < 1_000_000
+    print(f'dist/index.html: {size} bytes <= 900000 = {size <= 900_000}')
+    assert size <= 900_000
     og = ROOT / 'dist/og.jpg'
     with Image.open(og) as im:
         print(f'dist/og.jpg: {im.width}x{im.height}, {og.stat().st_size} bytes')

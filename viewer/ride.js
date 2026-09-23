@@ -2,6 +2,7 @@
 const rideBadge=$('ride-badge');
 let rideDistance=0,savedOverview=null;
 const rideEye=new THREE.Vector3(),rideLook=new THREE.Vector3(),lastSafeEye=new THREE.Vector3();
+const ridePose={eye:rideEye,look:rideLook};
 function poseOnRoute(route,distance) {
   sampleRoute(route,distance,rideEye);rideEye.y+=.64;
   let ahead=3.4;
@@ -10,7 +11,7 @@ function poseOnRoute(route,distance) {
   // Covers a future edited footprint or height without flying through geometry.
   if(pointBlocked(rideEye,.14)) rideEye.copy(lastSafeEye);
   else lastSafeEye.copy(rideEye);
-  return {eye:rideEye,look:rideLook};
+  return ridePose;
 }
 function startRide() {
   if(state.ride>=0)return;

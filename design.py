@@ -114,7 +114,16 @@ def build_design(data, layout):
             raise ValueError(f"Unsafe street: {route['name']} clearance={clearance:.3f}")
         route["clearance"] = round(clearance, 3)
         route["points"] = [[round(x, 4), round(y, 4)] for x, y in route["points"]]
-    return {"palette": PALETTE, "buildings": buildings, "routes": routes}
+    # Ordered placement slots: later layers must consume earlier reservations.
+    bridges = []
+    lake = []
+    stages = []
+    venues = []
+    furniture = []
+    trees = []
+    return {"palette": PALETTE, "buildings": buildings, "routes": routes,
+            "bridges": bridges, "lake": lake, "stages": stages, "venues": venues,
+            "furniture": furniture, "trees": trees}
 
 
 def main():

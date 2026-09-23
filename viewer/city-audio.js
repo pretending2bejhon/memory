@@ -59,6 +59,29 @@ const cityAudio = (() => {
   let preferred = 'off', state = 'off', rideHeading = null, pending = null, serial = 0, startToken = 0;
   const buses = [], listeners = new Set(), timeline = {}, waveCurves = new Map();
   const compiled = new Map(), orbitTargets = new Map(), preloaded = new Map();
+  // Sample the device clock on the existing scheduler, outside the render loop.
+  const outputClock = {contextTime: 0, performanceTime: 0, outputLatency: 0, timestamp: false};
+  function sampleOutputClock() {
+    outputClock.outputLatency = Number(ctx.outputLatency) || Number(ctx.baseLatency) || 0;
+    const stamp = typeof ctx.getOutputTimestamp === 'function' ? ctx.getOutputTimestamp() : null;
+    outputClock.timestamp = !!(stamp && stamp.performanceTime > 0 && Number.isFinite(stamp.contextTime));
+    outputClock.contextTime = outputClock.timestamp ? stamp.contextTime : ctx.currentTime - outputClock.outputLatency;
+    outputClock.performanceTime = outputClock.timestamp ? stamp.performanceTime : performance.now();
+  }
+  // One stable slot per event: the renderer consumes this without creating event objects.
+  const hitRing = {capacity: 512, written: 0, read: 0, dropped: 0,
+    slots: Array.from({length: 512}, () => ({room: '', layer: '', time: 0, gain: 0,
+      sequence: -1, released: true, source: 'audio', effect: '', audibleAt: 0,
+      releasedAt: 0, frame: 0, lateMs: 0}))};
+  function recordHit(bus, layer, time, value) {
+    const sequence = hitRing.written++, slot = hitRing.slots[sequence % hitRing.capacity];
+    if (!slot.released && sequence - hitRing.read >= hitRing.capacity) hitRing.dropped++;
+    if (sequence - hitRing.read >= hitRing.capacity) hitRing.read = sequence - hitRing.capacity + 1;
+    slot.room = bus.id; slot.layer = layer; slot.time = time; slot.sequence = sequence; slot.released = false;
+    slot.gain = Number.isFinite(value.gain) ? value.gain : 1;
+    if (bus.density < (layerThresholds[layer] ?? .30) ||
+        (bus.lowMuted && bus.low.has(layer) && time < (bus.dropAt ?? Infinity))) slot.gain = 0;
+  }
   const diagnostics = {switches: [], scheduledSteps: 0, scheduledVoices: 0, droppedSteps: 0, voiceErrors: 0,
     compileErrors: {}, bpm: BPM, timerMs: 25, lookaheadSeconds: LOOKAHEAD, sixteenthSeconds: SIXTEENTH,
     engine: 'strudel', strudel: STRUDEL_URL};
@@ -256,6 +279,7 @@ const cityAudio = (() => {
     ensureLayer(bus, name);
     S.superdough({...value, orbit: bus.orbits[name]}, time, seconds, CPS, cycle)
       .catch(error => { diagnostics.voiceErrors++; diagnostics.lastVoiceError = String(error); });
+    recordHit(bus, name, time, value);
     if (bus.spec.fx.gated && bus === active && (name === 'kick' || name === 'stab')) {
       reverbGate.gain.cancelAndHoldAtTime(time);
       reverbGate.gain.linearRampToValueAtTime(1, time + .004);
@@ -332,7 +356,7 @@ const cityAudio = (() => {
   function beginTransition(id, time) {
     if (!active || active.id === id) { pending = null; return; }
     const beat = BAR / 4, startBar = Math.round((time - origin) / BAR);
-    const dropBar = Math.ceil((startBar + MIN_BRIDGE) / PHRASE) * PHRASE, drop = origin + dropBar * BAR;
+    const dropBar = nextDrop(startBar), drop = origin + dropBar * BAR;
     outgoing = active; active = enterBridge(id, time, drop);
     // The old room loses its kick and bass on the first beat, and a low-pass closes across the bridge.
     outgoing.lowMuted = true; lowTo(outgoing, 0, time + beat, beat);
@@ -373,6 +397,7 @@ const cityAudio = (() => {
   }
   function scheduler() {
     if (!enabled || !ctx) return;
+    sampleOutputClock();
     const now = ctx.currentTime;
     for (let i = graveyard.length - 1; i >= 0; i--) if (now >= graveyard[i].at) { retire(graveyard[i].bus); graveyard.splice(i, 1); }
     if (transition && now >= transition.end + .3) {
@@ -459,6 +484,8 @@ const cityAudio = (() => {
   const api = {
     get ctx() { return ctx; }, get room() { return active?.id || desired; }, get analyser() { return analyser; },
     get enabled() { return enabled; }, get preferred() { return preferred; }, get state() { return state; },
+    get origin() { return origin; }, get desired() { return desired; }, hitRing, nextDrop, outputClock,
+    arrangementPhase(id, bar) { return phase(rooms[id] || rooms.skyline, bar); },
     get transition() { return transition; }, get buses() { return buses; }, get strudel() { return S; },
     get cut() { return cut; }, phrase: PHRASE, minBridge: MIN_BRIDGE,
     get ready() { return compiled.size > 0; },

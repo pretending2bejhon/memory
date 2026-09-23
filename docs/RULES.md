@@ -1,6 +1,6 @@
 # Rules
 
-The same rules drive the Blender renders and the interactive viewer. They are implemented twice, in `city.py` and in `viewer/template.html`, and must be kept identical. `LOG.md` records the decay rules as they were written before the code.
+The same note census, dimensions, timeline and decay rules drive the Blender renders and the interactive viewer. Their implementations in `city.py` and `viewer/template.html` preserve these data meanings. The beat bus, adaptive quality and rave society layers belong only to the viewer; the Blender pipeline does not gain them. `LOG.md` records the decay rules as they were written before the code.
 
 ## Time
 

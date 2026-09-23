@@ -68,7 +68,8 @@ Blender 5.2 specifics worth knowing: compositing uses `scene.compositing_node_gr
 
 Reads the anonymous data and layout, generates the shared design, compacts nodes into arrays, and inlines the data and viewer source modules into `viewer/template.html`.
 
-The source modules are `viewer/city-life.js`, `viewer/ride.js` and `viewer/city-audio.js`. The audio module replaces the `__CITY_AUDIO__` placeholder in the same build pass. It contains procedural Web Audio voices and room definitions; the build emits no audio directory or audio files. Sound remains off until a deliberate activation of its control, including when an on preference was remembered.
+The source modules are `viewer/city-life.js`, `viewer/ride.js`, `viewer/city-audio.js`,
+`viewer/beat.js`, `viewer/rave-light.js`, `viewer/crowd.js` and `viewer/society.js`. Each module is inlined through its own template placeholder. The audio module replaces the `__CITY_AUDIO__` placeholder in the same build pass. It schedules the Strudel room files and routes their samples and synths; the build emits no audio directory or audio files. Sound remains off until a deliberate activation of its control, including when an on preference was remembered.
 
 The audio module plays twelve district rooms (Strudel code in `viewer/rooms/`) and the Skyline overview mix. All use the same 140 BPM audio clock. District focus and ride hooks request a switch that starts on the next bar and drops on the next eight-bar phrase. Musical arrangements cycle over 32 bars, except The Yards at 16; Signal Row's musical loop repeats every four bars. On each week update the renderer supplies district density and brightness, which control layer thresholds, low-pass cutoff and reverb with 250 ms smoothing. [VIEWER.md](VIEWER.md) documents the formulas and fixed layer order.
 
@@ -83,9 +84,9 @@ For publication, run `python viewer/build.py --public`. The public build replace
 - `dist/.nojekyll`: the hosting marker.
 - `dist/og.jpg`: a 1200 by 630 preview generated from `final.png`, below 200 KB.
 
-Never hand-edit either generated viewer page or anything under `dist/`. Change the viewer sources and rebuild. The public page must pass the privacy grep gate and remain below 1 MB before publication. `qa_public.py` runs the static gates and `qa_city.py` and `qa_audio.py` run the browser gates.
+Never hand-edit either generated viewer page or anything under `dist/`. Change the viewer sources and rebuild. The public page must pass the privacy grep gate and remain at or below 900,000 bytes before publication. `qa_public.py` runs the static gates; `qa_city.py`, `qa_audio.py` and `qa_world.py` run the browser gates.
 
-The viewer needs a network connection for three.js (jsDelivr) and Rajdhani and IBM Plex fonts (Google Fonts). Everything else is inline.
+The viewer needs a network connection for three.js (jsDelivr) and Rajdhani and IBM Plex fonts (Google Fonts). Strudel and its samples load after a Sound gesture from the existing audio sources documented in VIEWER.md. Geometry and visual textures are procedural.
 
 ## 5. `contact.py`
 
@@ -109,7 +110,15 @@ Start the local server and run the browser gates:
 python -m http.server 8765 --bind 127.0.0.1
 ```
 
-In another terminal run `python qa_public.py`, `python qa_city.py --url http://127.0.0.1:8765/dist/ --prefix public` and `python qa_audio.py --phase p2 --url http://127.0.0.1:8765/dist/ --prefix public`. Browser QA must report zero collisions and zero page errors; the public page must expose 1,246 nodes, and screenshots must include desktop and 375 px views in `renders/qa/`.
+In another terminal run `python qa_public.py`, then the browser suites below. The local browser harness requires Python 3.11. Select the phase that the sources implement; `v0` is the foundations phase, and Run A ends at `v3`.
+
+```powershell
+py -V:Astral/CPython3.11.15 qa_city.py --url http://127.0.0.1:8765/dist/ --prefix public
+py -V:Astral/CPython3.11.15 qa_audio.py --phase p2 --url http://127.0.0.1:8765/dist/ --prefix public
+py -V:Astral/CPython3.11.15 qa_world.py --phase v0 --url http://127.0.0.1:8765/dist/ --prefix public
+```
+
+Browser QA must report zero collisions and zero page errors, all 36 audio checks, and every world gate for the implemented phase. The public page must expose 1,246 nodes, and screenshots must include desktop and 375 px views in `renders/qa/`. World reports list the scenes measured, their settled tiers and the phase-scoped performance budgets; future scenes are not marked passed before they exist.
 
 `python qa_audio.py` shares the browser harness with `python qa_city.py`. Audio gates cover autoplay prevention, context activation, signal level, the phrase-locked transition, frame rate with sound on and console errors. The full room check waits for each switch to settle, then samples for four seconds; all twelve rooms must be non-silent, and every pair must differ by at least 8 percent in spectral centroid or 2 dB in RMS. The Archive check scrubs weeks 0 through 12 and tests cutoff against measured brightness, which may rise or fall over chronological time. Run both suites after changing the engine or viewer hooks. Keep their fresh command output in the handoff; a successful build alone is not an audio check.
 

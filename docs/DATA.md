@@ -10,7 +10,9 @@ The export and layout JSON files in `data/` hold numeric state, week indices and
 
 Without `--public`, the build preserves the original folder metadata in `viewer/index.html` and `viewer/artifact.html` for private inspection. Do not publish those default outputs. Do not alter the export merely to mask the page; masking belongs in the public build.
 
-Before publishing, `dist/index.html` must contain no dated folder name, no Windows path, no vault root and no note path, and every published subdistrict label must match `block <n>`. The build must stay below 1 MB. `qa_public.py` runs these gates and the owner publishes only after they pass.
+Before publishing, `dist/index.html` must contain no dated folder name, no Windows path, no vault root and no note path, and every published subdistrict label must match `block <n>`. The build must stay at or below 900,000 bytes. `qa_public.py` runs these gates and the owner publishes only after they pass.
+
+New scenery text comes from curated source lists, numbers, existing district display names, or the room titles and style lines already in the page. It never derives new labels from the export's strings. Existing district identifiers and the public mask remain unchanged; new source text must not introduce venture, client or real-person names.
 
 ## `data/vault-city.json`
 
@@ -79,7 +81,7 @@ Coordinates: the plan is 2D with `z` up. Blender uses it directly. The viewer ma
 
 ## The viewer's compact form
 
-`viewer/build.py` embeds compact arrays to keep the public page below the 1 MB gate:
+`viewer/build.py` embeds compact arrays to keep the public page within the 900 KB gate:
 
 ```
 districts, subs, types, statuses : string tables

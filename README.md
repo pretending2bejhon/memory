@@ -76,8 +76,10 @@ The music is written in [Strudel](https://strudel.cc/), the browser port of Tida
 | `contact.py` | Contact sheet of the design iterations with their scores (Pillow) |
 | `viewer/template.html`, `viewer/city-life.js`, `viewer/ride.js` | Interactive city, street life and ride camera |
 | `viewer/city-audio.js` | Sound engine: 140 BPM transport, room buses, phrase-locked DJ transitions and timeline mix around Strudel |
+| `viewer/beat.js`, `viewer/rave-light.js` | Shared visual beat clock, light limiter, Lights setting and adaptive quality |
+| `viewer/crowd.js`, `viewer/society.js` | Instanced citizens and traffic, split from street geometry |
 | `viewer/rooms/*.strudel` | The twelve rooms as Strudel code, one file per district |
-| `qa_city.py`, `qa_audio.py` | Shared browser harness for city geometry, interaction, sound and performance gates |
+| `qa_city.py`, `qa_audio.py`, `qa_world.py` | Shared browser harness for city geometry, interaction, sound and performance gates |
 | `viewer/build.py` | Compacts data into private local pages by default; `--public` creates the masked publication in `dist/` |
 | `data/vault-city.json` | Anonymous nodes and edges, numeric state and folder metadata |
 | `data/layout.json` | Positions and plateaus |
