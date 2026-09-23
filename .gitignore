@@ -10,3 +10,5 @@ __pycache__/
 dist/
 HANDOFF.md
 docs/SPEC.md
+docs/SPEC-rave.md
+HANDOFF-rave.md
