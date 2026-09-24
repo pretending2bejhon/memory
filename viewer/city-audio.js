@@ -194,7 +194,6 @@ const cityAudio = (() => {
   const diagnostics = {switches: [], scheduledSteps: 0, scheduledVoices: 0, droppedSteps: 0, voiceErrors: 0,
     compileErrors: {}, bpm: BPM, timerMs: 25, lookaheadSeconds: LOOKAHEAD, commitSeconds: COMMIT, lateSeconds: LATE, latencyHint: OUTPUT_LATENCY,
     lateShifted: 0, lateDropped: 0, workerTicks: 0, braces: 0, sixteenthSeconds: SIXTEENTH,
-    gainsCreated: 0, gainsReused: 0, gainsReleased: 0,
     engine: 'strudel', strudel: STRUDEL_URL};
   try { preferred = localStorage.getItem('vc-sound') === 'on' ? 'on' : 'off'; } catch (_) {}
   if (preferred === 'on') state = 'waiting';
@@ -216,63 +215,6 @@ const cityAudio = (() => {
     waveCurves.set(key, result);
     return result;
   }
-  // Strudel builds four or five gain nodes for every voice (about 155 a second here, through
-  // createGain() and `new GainNode`) and lets them go when the voice ends. Chrome deletes dead audio
-  // nodes only after a full garbage collection, which this page, allocating little, gets about every
-  // 100 s, and then deletes the nodes of those 100 s in one main-thread task of well over 100 ms: a
-  // hitch in the picture. So this context hands a released gain out again instead of making a new one.
-  // A gain counts as released when it is disconnected with no arguments inside an `ended` event of this
-  // context, which is how a Strudel voice and the riser let their nodes go. It then waits a second
-  // (whatever still fed it from its own voice has stopped by then), leaves the wait if anything connects
-  // it again, and comes back with its automation cancelled and its defaults (or the constructor's
-  // options) restored, so it plays exactly as a new node would. Only the garbage changes. Every other
-  // context and every other kind of node is left alone.
-  const RECYCLE_WAIT = 1, RECYCLE_MAX = 4096;
-  function recycleGains() {
-    const create = ctx.createGain.bind(ctx), connect = AudioNode.prototype.connect, disconnect = AudioNode.prototype.disconnect;
-    const NativeGain = window.GainNode, waiting = [], spare = [];
-    let head = 0;
-    function release() {
-      disconnect.apply(this, arguments);
-      const event = window.event;
-      if (arguments.length || this.recycleAt || event?.type !== 'ended' || event.target?.context !== ctx) return;
-      if (waiting.length - head >= 2 * RECYCLE_MAX || spare.length >= RECYCLE_MAX) return;
-      this.recycleAt = ctx.currentTime + RECYCLE_WAIT; waiting.push(this, this.recycleAt); diagnostics.gainsReleased++;
-    }
-    function use() { this.recycleAt = 0; return connect.apply(this, arguments); }
-    function adopt(node) { node.recycleAt = 0; node.disconnect = release; node.connect = use; diagnostics.gainsCreated++; return node; }
-    function reuse(options) {
-      const now = ctx.currentTime;
-      while (head < waiting.length && waiting[head + 1] <= now) {
-        const node = waiting[head];
-        // An entry is stale when the gain was connected again or released again since.
-        if (node.recycleAt === waiting[head + 1]) { node.recycleAt = -1; spare.push(node); }
-        waiting[head] = null; head += 2;
-      }
-      if (head >= 8192) { waiting.splice(0, head); head = 0; }
-      let node;
-      while ((node = spare.pop()) && node.recycleAt !== -1);
-      if (!node) return null;
-      node.recycleAt = 0; node.gain.cancelScheduledValues(0);
-      const count = options?.channelCount ?? 2, mode = options?.channelCountMode ?? 'max';
-      const interpretation = options?.channelInterpretation ?? 'speakers';
-      if (node.channelCount !== count) node.channelCount = count;
-      if (node.channelCountMode !== mode) node.channelCountMode = mode;
-      if (node.channelInterpretation !== interpretation) node.channelInterpretation = interpretation;
-      node.gain.value = options?.gain ?? 1;
-      diagnostics.gainsReused++;
-      return node;
-    }
-    ctx.createGain = () => reuse() || adopt(create());
-    // Strudel also builds gains with the constructor; only those of this context take the same path.
-    function GainNode(context, options) {
-      if (!new.target) return NativeGain(context, options);
-      if (context !== ctx) return new NativeGain(context, options);
-      return reuse(options) || adopt(new NativeGain(context, options));
-    }
-    GainNode.prototype = NativeGain.prototype;
-    window.GainNode = GainNode;
-  }
   function gain(value = 1) { const node = ctx.createGain(); node.gain.value = value; return node; }
   function filter(type, hz, q = .7) { const node = ctx.createBiquadFilter(); node.type = type; node.frequency.value = hz; node.Q.value = q; return node; }
   function follow(param, value, at = ctx.currentTime) { param.setTargetAtTime(value, at, SMOOTH); }
@@ -285,7 +227,6 @@ const cityAudio = (() => {
     // (getOutputTimestamp), so the only change is that a busy machine no longer starves the device.
     // On this laptop under load it cut output underruns about tenfold (the music cutting out).
     ctx = new AudioConstructor({latencyHint: OUTPUT_LATENCY});
-    recycleGains();
     const impulse = ctx.createBuffer(2, Math.ceil(ctx.sampleRate * 2.4), ctx.sampleRate);
     compressor = ctx.createDynamicsCompressor();
     compressor.threshold.value = -12; compressor.knee.value = 12; compressor.ratio.value = 3;
