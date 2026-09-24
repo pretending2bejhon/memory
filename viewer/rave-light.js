@@ -41,49 +41,85 @@ const lights = (() => {
   return api;
 })();
 
-// C13.2 governor. Drop a tier when the mean frame interval passes 19 ms over 3 s; climb back one after
-// 10 s whose rolling 3 s mean frame WORK time (frame() itself, render call included, measured by the
-// page loop) stays under 12 ms. Intervals cannot show headroom on a vsync-capped display (16.7 ms at
-// 60 Hz), so a climb rule on intervals never fired and one stall pinned Tier 1 for good. The work time
-// cannot see the GPU or a busy machine, so a climb also needs the frames to keep the display's pace
-// (3 s mean interval under 18 ms) and to miss almost none (under 3 % of the window's intervals over
-// 20 ms): a page still missing frames at its tier never climbs, even when the misses are too sparse to
-// lift the mean (one in 16 frames at 33 ms is a 17.8 ms mean but a 33 ms p95, over the 22 ms budget of
-// C13.3, and the 19 ms drop rule would never take it back). When the
-// tier above is the one the GPU cannot hold, a drop within 10 s of a climb doubles the fast span the
-// next climb needs (up to 80 s; back to 10 s once a climb holds for a minute), so the governor cannot
-// ping-pong. Without a work time (the QA feeds only intervals) the interval stands in for it: the work
-// inside a frame never exceeds it. Rolling means, no allocation per frame. A tier change resizes the
-// render targets only (renderScale): it never moves the camera.
+// The tier governor (C13.2), on three-second rolling means kept without allocating a frame history.
+// Every frame interval and work time is clamped to 100 ms first, so one long frame (a GC, the Sound
+// start, a tab switch) cannot drop a tier by itself; the frame loop also holds the governor through load,
+// the Sound start and a return from the background (hold).
+// Drop: one tier when the mean frame interval passes 19 ms over 3 s.
+// Climb: one tier after 10 s whose rolling 3 s mean frame WORK time (frame() itself, render call
+// included, measured by the page loop) stays under 12 ms. Intervals cannot show headroom on a
+// vsync-capped display (16.7 ms at 60 Hz), so a climb rule on intervals never fired and one stall pinned
+// Tier 1 for good. The work time cannot see the GPU or a busy machine, so a climb also needs the frames
+// to keep the display's pace (3 s mean interval under 18 ms) and to miss almost none (under 3 % of the
+// window's intervals over 20 ms): a page still missing frames at its tier never climbs, even when the
+// misses are too sparse to lift the mean (one in 16 frames at 33 ms is a 17.8 ms mean but a 33 ms p95,
+// over the 22 ms budget of C13.3, and the 19 ms drop rule would never take it back).
+// Backoff: a drop within 30 s of a climb means the climbed-into tier could not be held. It doubles the
+// fast span the next climb needs (up to 80 s; back to 10 s once a climb holds for a minute), and after
+// two such failures into one tier the page stops trying that tier for the session, so a GPU-bound page
+// (its work time looks light while the GPU is the limit) cannot keep flipping the crowd and traffic
+// counts on screen.
+// The music comes first: the frame loop reports the audio clock's rate against the wall clock every two
+// seconds while the sound plays. Below 0.95 the audio thread renders slower than real time (the music
+// drags and cuts out), so the page gives it room: one tier down (at most every 3 s), and no climb until
+// the clock has been healthy for 20 s.
+// Without a work time (the QA feeds only intervals) the interval stands in for it: the work inside a
+// frame never exceeds it. A tier change never touches the camera: crowd, traffic and bloom change at
+// once, and entering or leaving Tier 1 (pixel ratio 1) resizes the canvas at the next idle moment
+// (retune in the page).
 const tier = (() => {
+  const SPAN=3000,DROP_MS=19,CLIMB_MS=12,PACE_MS=18,SLOW_MS=20,SLOW_SHARE=.03,CLAMP_MS=100,STARVED=.95,CALM_MS=20000;
+  const WAIT_MS=10000,WAIT_MAX=80000,HELD_MS=60000,FAILED_MS=30000;
   const times=new Float64Array(1024),values=new Float64Array(1024),works=new Float64Array(1024);
-  const SLOW_MS=20,SLOW_SHARE=.03;
-  let current=phone?1:3,head=0,count=0,sum=0,workSum=0,slow=0,clockMs=0,fastMs=0,changedAt=0,climbedAt=-Infinity,climbNeedMs=10000;
+  let current=phone?1:3,head=0,count=0,sum=0,workSum=0,slow=0,clockMs=0,fastMs=0,changedAt=0;
+  let climbedAt=-Infinity,climbWait=WAIT_MS,holdUntil=0,calmUntil=0,audioDropAt=-Infinity,audioRate=1;
+  const failedClimbs=new Uint8Array(4);
   function apply(){
     crowd.applyTier(current);
     cars.mesh.count=vehicleCount();
-    renderScale();
+    bloomSize();
+    retune();
+  }
+  function reset(){head=0;count=0;sum=0;workSum=0;slow=0;fastMs=0;}
+  function drop(){
+    if(clockMs-climbedAt<FAILED_MS){climbWait=Math.min(climbWait*2,WAIT_MAX);failedClimbs[current]++;climbedAt=-Infinity;}
+    current--;changedAt=clockMs;fastMs=0;apply();
   }
   const api={
     initial:phone?1:3,
     get current(){return current;},
     get meanMs(){return count?sum/count:0;},
+    // The mean work time and the next climb's wait, each under both names the gates and probes read.
     get meanWorkMs(){return count?workSum/count:0;},
+    get workMeanMs(){return count?workSum/count:0;},
     get slowShare(){return count?slow/count:0;},
     get settledForMs(){return clockMs-changedAt;},
-    get climbNeedMs(){return climbNeedMs;},
+    get climbNeedMs(){return climbWait;},
+    get climbWaitMs(){return climbWait;},
+    get holdUntil(){return holdUntil;},
+    get audioRate(){return audioRate;},
+    get failedClimbs(){return [failedClimbs[2],failedClimbs[3]];},
+    // Real frames are ignored until performance.now() passes holdUntil; the window restarts.
+    hold(ms){holdUntil=Math.max(holdUntil,performance.now()+ms);reset();},
+    audio(rate){
+      const now=performance.now();audioRate=rate;
+      if(rate>=STARVED)return;
+      calmUntil=now+CALM_MS;fastMs=0;
+      if(current>1&&now-audioDropAt>=3000){audioDropAt=now;drop();}
+    },
     update(ms,workMs=ms){
+      ms=Math.min(ms,CLAMP_MS);workMs=Math.min(workMs,CLAMP_MS);
       clockMs+=ms;
-      while(count && (clockMs-times[head]>3000 || count===1024)){
+      while(count && (clockMs-times[head]>SPAN || count===1024)){
         sum-=values[head];workSum-=works[head];if(values[head]>SLOW_MS)slow--;head=(head+1)%1024;count--;
       }
       const slot=(head+count)%1024;times[slot]=clockMs;values[slot]=ms;works[slot]=workMs;sum+=ms;workSum+=workMs;if(ms>SLOW_MS)slow++;count++;
-      fastMs=api.meanWorkMs<12&&api.meanMs<18&&slow<SLOW_SHARE*count?fastMs+ms:0;
-      if(climbNeedMs>10000&&changedAt===climbedAt&&clockMs-changedAt>=60000)climbNeedMs=10000;
-      if(clockMs-changedAt>=3000 && clockMs-times[head]>=2900 && api.meanMs>19 && current>1){
-        if(clockMs-climbedAt<10000)climbNeedMs=Math.min(80000,climbNeedMs*2);
-        current--;changedAt=clockMs;fastMs=0;apply();
-      } else if(fastMs>=climbNeedMs && current<3 && !phone){
+      const mean=sum/count,workMean=workSum/count;
+      fastMs=workMean<CLIMB_MS&&mean<PACE_MS&&slow<SLOW_SHARE*count?fastMs+ms:0;
+      if(climbWait>WAIT_MS&&changedAt===climbedAt&&clockMs-changedAt>=HELD_MS)climbWait=WAIT_MS;
+      if(clockMs-changedAt>=SPAN && clockMs-times[head]>=SPAN-100 && mean>DROP_MS && current>1){
+        drop();
+      } else if(fastMs>=climbWait && current<3 && !phone && performance.now()>=calmUntil && failedClimbs[current+1]<2){
         current++;changedAt=clockMs;climbedAt=clockMs;fastMs=0;apply();
       }
     },
@@ -123,6 +159,8 @@ const rave = (() => {
   }
   palettes.skyline=palettes.working;
   const spectrum=new Float32Array(16),wave=new Float32Array(32),frequencyBytes=new Uint8Array(2048),waveBytes=new Uint8Array(4096);
+  const bandLo=new Uint16Array(16),bandHi=new Uint16Array(16);let analyserFrame=0;
+  for(let i=0;i<16;i++){bandLo[i]=Math.floor(Math.pow(i/16,2)*700);bandHi[i]=Math.max(bandLo[i]+1,Math.floor(Math.pow((i+1)/16,2)*700));}
   const ripples=Array.from({length:16},()=>new THREE.Vector4(0,0,-100,0));
   const uniforms={uTime:{value:0},uClock:{value:0},uBeat:{value:0},uColor:{value:palettes.working.color.clone()},
     uAccent:{value:palettes.working.accent.clone()},uNight:{value:col(DEEP)},uEnergy:{value:0},uSourceIntensity:{value:.5},
@@ -221,12 +259,16 @@ const rave = (() => {
     fragmentShader:`varying vec3 vWorld;uniform vec3 uColor,uNight;uniform float uClock,uEnergy,uSourceIntensity,uCut,uBass;uniform vec4 uRipples[16];
       float line(vec2 p){vec2 w=max(fwidth(p),vec2(.001));vec2 g=abs(fract(p-.5)-.5)/w;return 1.0-min(min(g.x,g.y),1.0);}
       void main(){vec2 p=vWorld.xz;float minor=line(p),major=line(p/8.0),rings=0.0;
-        for(int i=0;i<16;i++){float age=uClock-uRipples[i].z;float radius=age*20.0;float active=step(0.0,age)*step(age,1.5);float ring=exp(-pow((length(p-uRipples[i].xy)-radius)*1.7,2.0));rings+=ring*active*(1.0-age/1.5)*uRipples[i].w;}
+        for(int i=0;i<16;i++){float age=uClock-uRipples[i].z;float radius=age*20.0;float on=step(0.0,age)*step(age,1.5);float ring=exp(-pow((length(p-uRipples[i].xy)-radius)*1.7,2.0));rings+=ring*on*(1.0-age/1.5)*uRipples[i].w;}
         vec3 c=uNight*.65+uColor*((minor*.028+major*.075)*(.35+uEnergy)+rings*(.2+uBass*.04)*uEnergy*uSourceIntensity)*uCut;
         gl_FragColor=vec4(c,1.0);
         #include <colorspace_fragment>
       }`
   }));grid.rotation.x=-Math.PI/2;grid.position.y=-.02;grid.frustumCulled=false;scene.add(grid);
+  // The grid floor's shader did not link until 'active' (a reserved word in GLSL ES 3.00) was renamed,
+  // so the floor has never been seen. Lit, it changes the whole ground; it stays hidden until the owner
+  // has looked at it (grid.visible=true shows it). Its ripple uniforms keep updating either way.
+  grid.visible=false;
 
   const core=DATA.plateaus.core,coreNodes=nodes.filter(n=>n.district==='core').sort((a,b)=>b.h-a.h),towers=nodes.filter(n=>n.district==='working').sort((a,b)=>b.h-a.h);
   const laserHosts=[],laserOrigins=[];
@@ -389,8 +431,12 @@ const rave = (() => {
     const analyser=cityAudio.analyser;
     if(reduced){for(let i=0;i<32;i++){wave[i]=0;if(i<16)spectrum[i]=.08;}}
     else if(beat.sound&&analyser){
-      analyser.getByteFrequencyData(frequencyBytes);analyser.getByteTimeDomainData(waveBytes);
-      for(let i=0;i<16;i++){const lo=Math.floor(Math.pow(i/16,2)*700),hi=Math.max(lo+1,Math.floor(Math.pow((i+1)/16,2)*700));let sum=0;for(let j=lo;j<hi;j++)sum+=frequencyBytes[j];spectrum[i]=sum/(hi-lo)/255;}
+      // The 4096-point FFT runs on this thread: the screens' spectrum refreshes every other frame.
+      if((analyserFrame++&1)===0){
+        analyser.getByteFrequencyData(frequencyBytes);
+        for(let i=0;i<16;i++){const lo=bandLo[i],hi=bandHi[i];let sum=0;for(let j=lo;j<hi;j++)sum+=frequencyBytes[j];spectrum[i]=sum/(hi-lo)/255;}
+      }
+      analyser.getByteTimeDomainData(waveBytes);
       for(let i=0;i<32;i++)wave[i]=(waveBytes[i*128]-128)/128;
     }else for(let i=0;i<32;i++){wave[i]=reduced?0:Math.sin(i*.5+snapshot.totalBeats)*.2;if(i<16)spectrum[i]=reduced?.08:.08+.18*Math.pow(Math.sin(i*.71+snapshot.totalBeats*.8),2);}
     lasers.count=tier.current===3?14:tier.current===2?10:6;searchlights.count=tier.current===3?4:2;droneGeometry.setDrawRange(0,tier.current===3?256:tier.current===2?128:0);fireUniforms.uParticleLimit.value=tier.current===3?64:tier.current===2?38:26;

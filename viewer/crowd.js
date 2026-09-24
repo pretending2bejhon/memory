@@ -240,7 +240,10 @@ function writePose(array,index,kind){
 function hideIndex(array,index){const o=index*16;for(let k=0;k<16;k++)array[o+k]=0;}
 const pose={dip:0,jump:0,sway:0,twist:0,lean:0,nod:0,aA:0,bA:0,aB:0,bB:0,lA:0,lB:0};
 const ROBOT=[[-1.57,0,-1.57,0,0],[-1.57,0,0,-1.3,.35],[0,1.45,0,-1.45,0],[-3.0,-.1,0,-.2,-.3],[-1.57,1.2,-1.57,-1.2,0],[-.2,.25,-2.4,-.3,.3]];
-function stylePose(style,t,e,seed,out){
+// The pose writers read their numbers from POSE_IN (0 beat time, 1 energy, 2 seed), so a call boxes no double.
+const POSE_IN=new Float64Array(3);
+function stylePose(style,out){
+  const t=POSE_IN[0],e=POSE_IN[1],seed=POSE_IN[2];
   const TWO=Math.PI*2,p=((t%1)+1)%1,bi=Math.floor(t),beatWave=.5+.5*Math.cos(TWO*p);
   out.dip=0;out.jump=0;out.sway=0;out.twist=0;out.lean=0;out.nod=.12*e*beatWave;
   out.aA=-.35;out.bA=.12;out.aB=-.35;out.bB=-.12;out.lA=0;out.lB=0;
@@ -269,12 +272,14 @@ function stylePose(style,t,e,seed,out){
     case 'dj':out.dip=.012*beatWave;out.nod=.32*beatWave;out.aA=-1.15;out.bA=.05;out.aB=-1.05+.12*Math.sin(Math.PI*t/2);out.bB=-.08;out.lean=.1;break;
   }
 }
-function walkPose(t,relaxed,out){
+function walkPose(relaxed,out){
+  const t=POSE_IN[0];
   const w=Math.sin(Math.PI*(relaxed?t/2:t));
   out.dip=.006*Math.abs(Math.cos(Math.PI*(relaxed?t/2:t)));out.jump=0;out.sway=0;out.twist=0;out.lean=.02;out.nod=0;
   out.lA=-.42*w;out.lB=.42*w;out.aA=.3*w;out.bA=.08;out.aB=-.3*w;out.bB=-.08;
 }
-function stillPose(kind,t,out){
+function stillPose(kind,out){
+  const t=POSE_IN[0];
   out.dip=0;out.jump=0;out.sway=0;out.twist=0;out.lean=0;out.nod=.05*Math.sin(Math.PI*t/2);out.aA=-.2;out.bA=.1;out.aB=-.2;out.bB=-.1;out.lA=0;out.lB=0;
   if(kind==='sit'){out.lA=out.lB=-1.45;out.dip=.075;out.aA=out.aB=-.9;}
   else if(kind==='vend'){out.aA=out.aB=-1.0;out.lean=.12;}
@@ -288,8 +293,47 @@ beat.on('cut',()=>{freezeBeat=beat.now().totalBeats;});
 beat.on('drop',()=>{freezeBeat=-1;dropBeat=beat.now().totalBeats;});
 beat.on('hit',h=>{if(h.layer==='stab')stabUntil=beat.now().totalBeats+.5;});
 
-const crowdState={walkers:CROWD_CAPS[phone?1:3].walkers,dancerCap:CROWD_CAPS[phone?1:3].dancers,extras:extrasCap(phone?1:3),stageVisible:stages.map(()=>0),stageTarget:stages.map(()=>0),frame:0};
-const shown=new Uint8Array(PEOPLE);
+const crowdState={walkers:CROWD_CAPS[phone?1:3].walkers,dancerCap:CROWD_CAPS[phone?1:3].dancers,extras:extrasCap(phone?1:3),stageVisible:stages.map(()=>0),stageTarget:stages.map(()=>0),frame:0,
+  posed:0,culled:0,lod:0};
+const shown=new Uint8Array(PEOPLE),inViewBefore=new Uint8Array(PEOPLE);
+// Upload budget: instance buffers are split into chunks of 64 people (or accessory slots); only the
+// chunks written this frame are sent to the GPU. Far people refresh by whole chunks, so a frame that
+// refreshes a third of the far crowd uploads about a third of the buffer.
+// partArrays is in part-id order (legA, legB, hips, torso, armA, armB, head, hair).
+const CHUNK=64,partArrays=[arrays.legA,arrays.legB,arrays.hips,arrays.torso,arrays.armA,arrays.armB,arrays.head,arrays.hair];
+const partAttributes=Object.values(personParts).map(m=>m.instanceMatrix);
+const partDirty=new Uint8Array(Math.ceil(PEOPLE/CHUNK)),accessoryDirty={},accessoryList=[];
+for(const [name,mesh] of Object.entries(accessoryMeshes)){accessoryDirty[name]=new Uint8Array(Math.ceil(mesh.count/CHUNK));accessoryList.push({attribute:mesh.instanceMatrix,dirty:accessoryDirty[name],count:mesh.count});}
+// Each accessory keeps its buffer, its dirty chunks and the writePose part it follows (a pair of glow
+// sticks follows both arms).
+people.forEach(p=>{for(const a of p.acc){a.array=accessoryMeshes[a.name].instanceMatrix.array;a.dirty=accessoryDirty[a.name];
+  const at=ACCESSORY_ATTACH[a.name];a.pair=at==='arms';
+  a.part=at==='head'?PART_HEAD:at==='torso'?PART_TORSO:at==='hips'?PART_HIP_ACC:at==='armA'?PART_ARM_A:PART_GROUND;}});
+const rangeStart=new Int32Array(64),rangeCount=new Int32Array(64);
+function collectRanges(dirty,items){
+  let n=0;
+  for(let c=0;c<dirty.length;c++){
+    if(!dirty[c])continue;
+    let e=c;while(e+1<dirty.length&&dirty[e+1])e++;
+    const start=c*CHUNK,end=Math.min(items,(e+1)*CHUNK);
+    rangeStart[n]=start*16;rangeCount[n]=(end-start)*16;n++;
+    for(let k=c;k<=e;k++)dirty[k]=0;
+    c=e;
+  }
+  return n;
+}
+// Range objects are reused per attribute (three.js clears the list after each upload); a list that was
+// not uploaded yet takes fresh ones, so an entry is never reused while it is still queued.
+const rangePools=new Map();
+function applyRanges(attribute,n){
+  if(!n)return;
+  if(attribute.updateRanges.length){for(let r=0;r<n;r++)attribute.addUpdateRange(rangeStart[r],rangeCount[r]);}
+  else{let pool=rangePools.get(attribute);if(!pool){pool=[];rangePools.set(attribute,pool);}
+    for(let r=0;r<n;r++){let range=pool[r];if(!range)range=pool[r]={start:0,count:0};range.start=rangeStart[r];range.count=rangeCount[r];attribute.updateRanges.push(range);}}
+  attribute.needsUpdate=true;
+}
+// A person is a sphere of half a unit around the waist for the frustum test.
+const PERSON_RADIUS=.5;
 const camWorld=new THREE.Vector3(),walkPoint=new THREE.Vector3(),walkAhead=new THREE.Vector3();
 function isVisible(i,p){
   if(p.kind===0)return i<crowdState.walkers;
@@ -313,43 +357,52 @@ function updatePeople(dt,now){
   if(!peopleGroup.visible)return;
   const frameIndex=crowdState.frame++,b=beat.now(),live=!reduced;
   const tr=beat.transition,stage=tr.active?tr.stage:'groove';
+  let posed=0,culled=0,lod=0;
   camWorld.copy(camera.position);
   for(let i=0;i<PEOPLE;i++){
     const p=people[i],visible=isVisible(i,p);
     if(!visible){
-      if(shown[i]){shown[i]=0;for(const name in arrays)hideIndex(arrays[name],i);
-        for(const a of p.acc){const arr=accessoryMeshes[a.name].instanceMatrix.array;if(a.name==='glow'){hideIndex(arr,a.slot*2);hideIndex(arr,a.slot*2+1);}else hideIndex(arr,a.slot);}}
+      if(shown[i]){shown[i]=0;for(let k=0;k<partArrays.length;k++)hideIndex(partArrays[k],i);partDirty[i>>6]=1;
+        for(let k=0;k<p.acc.length;k++){const a=p.acc[k];if(a.pair){hideIndex(a.array,a.slot*2);hideIndex(a.array,a.slot*2+1);a.dirty[(a.slot*2)>>6]=1;a.dirty[(a.slot*2+1)>>6]=1;}
+          else{hideIndex(a.array,a.slot);a.dirty[a.slot>>6]=1;}}}
+      inViewBefore[i]=0;
       continue;
     }
-    // Walkers keep walking every frame; far people refresh their pose less often.
-    let px,py,pz,yaw;
+    // Walkers keep walking every frame. Nobody outside the frustum is posed (their pose resumes the
+    // frame they come into view); far people refresh their pose less often, a chunk at a time.
+    let px,py,pz,yaw,far;
     if(p.kind===0){
       // A bridge walk path already runs on its walking line; a ring walker keeps to its side's lane.
       const route=p.path||routes[p.route],offset=p.path?0:Math.min(route.width/2+.04,route.clearance-.12);
       p.distance+=live?dt*p.speed*p.side:0;
-      sampleRoute(route,p.distance,walkPoint,offset*p.side);
-      const far=walkPoint.distanceToSquared(camWorld);
-      if(shown[i]&&far>2025&&(i+frameIndex)%(far>8100?6:3))continue;
-      sampleRoute(route,p.distance+.15*p.side,walkAhead,offset*p.side);
-      px=walkPoint.x;py=walkPoint.y+.006;pz=walkPoint.z;yaw=Math.atan2(walkAhead.x-walkPoint.x,walkAhead.z-walkPoint.z);
+      ROUTE_ARGS[0]=p.distance;ROUTE_ARGS[1]=offset*p.side;sampleRouteArgs(route,walkPoint);
+      px=walkPoint.x;py=walkPoint.y+.006;pz=walkPoint.z;
+      far=walkPoint.distanceToSquared(camWorld);
     } else {
       px=p.x;py=p.y+.002;pz=p.z;yaw=p.yaw;
       if(p.follow){p.follow(p,walkPoint);px=walkPoint.x;py=walkPoint.y;pz=walkPoint.z;yaw=p.yawNow;}
-      const dx=px-camWorld.x,dz=pz-camWorld.z,far=dx*dx+dz*dz;
-      if(shown[i]&&!p.follow&&far>2025&&(i+frameIndex)%(far>8100?6:3))continue;
+      const dx=px-camWorld.x,dz=pz-camWorld.z;far=dx*dx+dz*dz;
     }
-    shown[i]=1;
+    let outside=false;const cyw=py+.22;
+    for(let k=0;k<24;k+=4)if(viewPlanes[k]*px+viewPlanes[k+1]*cyw+viewPlanes[k+2]*pz+viewPlanes[k+3]<-PERSON_RADIUS){outside=true;break;}
+    if(outside){inViewBefore[i]=0;culled++;continue;}
+    const entering=!inViewBefore[i];inViewBefore[i]=1;
+    if(shown[i]&&!entering&&(p.kind===0||!p.follow)&&far>2025&&((i>>6)+frameIndex)%(far>8100?6:3)){lod++;continue;}
+    if(p.kind===0){const route=p.path||routes[p.route],offset=p.path?0:Math.min(route.width/2+.04,route.clearance-.12);
+      ROUTE_ARGS[0]=p.distance+.15*p.side;ROUTE_ARGS[1]=offset*p.side;sampleRouteArgs(route,walkAhead);yaw=Math.atan2(walkAhead.x-px,walkAhead.z-pz);}
+    shown[i]=1;posed++;
     const t=b.totalBeats+p.offset;
-    if(!live){stillPose(p.kind===3?p.pose:'stand',0,pose);if(p.kind===0)walkPose(0,false,pose);}
-    else if(p.kind===0)walkPose(t,p.relaxed,pose);
-    else if(p.kind===3&&p.pose!=='ride'&&p.pose!=='dance'){stillPose(p.pose,t,pose);
+    POSE_IN[0]=live?t:0;
+    if(!live){stillPose(p.kind===3?p.pose:'stand',pose);if(p.kind===0)walkPose(false,pose);}
+    else if(p.kind===0)walkPose(p.relaxed,pose);
+    else if(p.kind===3&&p.pose!=='ride'&&p.pose!=='dance'){stillPose(p.pose,pose);
       // Seated patrons raise the bottle for one bar on the drop.
       if(p.pose==='sit'){const since=b.totalBeats-dropBeat;if(since>=0&&since<4){pose.aA=-2.75;pose.bA=.12;pose.nod=-.15;}}}
     else{
       let e=p.energy,tt=t;
       if(stage==='bridge')e*=.5;
       if(stage==='cut'&&freezeBeat>=0)tt=freezeBeat+p.offset;
-      stylePose(p.style,tt,e,p.seed,pose);
+      POSE_IN[0]=tt;POSE_IN[1]=e;POSE_IN[2]=p.seed;stylePose(p.style,pose);
       if(stage==='bridge')pose.nod-=.32;
       const crowdMember=p.kind===1||p.kind===3;
       if(stage==='riser'&&crowdMember){const ph=((tt%1)+1)%1,close=.45*(.5+.5*Math.cos(Math.PI*2*ph));pose.aA=-2.85;pose.aB=-2.85;pose.bA=close;pose.bB=-close;pose.nod=-.25;}
@@ -370,17 +423,17 @@ function updatePeople(dt,now){
     writePose(arrays.armB,i,PART_ARM_B);
     writePose(arrays.head,i,PART_HEAD);
     writePose(arrays.hair,i,PART_HEAD);
+    partDirty[i>>6]=1;
     for(let k=0;k<p.acc.length;k++){
-      const a=p.acc[k],arr=accessoryMeshes[a.name].instanceMatrix.array,at=ACCESSORY_ATTACH[a.name];
-      if(at==='head')writePose(arr,a.slot,PART_HEAD);
-      else if(at==='torso')writePose(arr,a.slot,PART_TORSO);
-      else if(at==='hips')writePose(arr,a.slot,PART_HIP_ACC);
-      else if(at==='armA')writePose(arr,a.slot,PART_ARM_A);
-      else if(at==='arms'){writePose(arr,a.slot*2,PART_ARM_A);writePose(arr,a.slot*2+1,PART_ARM_B);}
-      else writePose(arr,a.slot,PART_GROUND);
+      const a=p.acc[k];
+      if(a.pair){writePose(a.array,a.slot*2,PART_ARM_A);writePose(a.array,a.slot*2+1,PART_ARM_B);a.dirty[(a.slot*2)>>6]=1;a.dirty[(a.slot*2+1)>>6]=1;}
+      else{writePose(a.array,a.slot,a.part);a.dirty[a.slot>>6]=1;}
     }
   }
-  for(const mesh of personMeshes)mesh.instanceMatrix.needsUpdate=true;
+  const n=collectRanges(partDirty,PEOPLE);
+  for(let k=0;k<partAttributes.length;k++)applyRanges(partAttributes[k],n);
+  for(let k=0;k<accessoryList.length;k++){const x=accessoryList[k];applyRanges(x.attribute,collectRanges(x.dirty,x.count));}
+  crowdState.posed=posed;crowdState.culled=culled;crowdState.lod=lod;
   personUniforms.uKick.value=rave.uniforms.uKick.value;personUniforms.uEnergy.value=rave.uniforms.uEnergy.value*rave.uniforms.uSourceIntensity.value;personUniforms.uCut.value=rave.uniforms.uCut.value;
 }
 for(const mesh of personMeshes)for(let i=0;i<mesh.count;i++)hideIndex(mesh.instanceMatrix.array,i);

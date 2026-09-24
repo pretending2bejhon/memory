@@ -11,11 +11,23 @@ const routes = DATA.design.routes.map(r => {
   const open = Boolean(r.shared), points = own.map(p => W(p[0], p[1], r.z));
   const lengths = [0];
   for (let i = 1; i <= points.length - (open ? 1 : 0); i++) lengths.push(lengths[i-1]+points[i-1].distanceTo(points[i%points.length]));
-  return {...r, points, lengths, length:lengths.at(-1), open, width:r.width ?? (r.district === 'episodic' ? .54 : .88),
+  // Unit side normal per segment, computed once, so sampling an offset lane allocates nothing. An open
+  // route's last entry (the closing segment it never drives) is never read.
+  const sideX = new Float64Array(points.length), sideZ = new Float64Array(points.length);
+  for (let i = 0; i < points.length; i++) { const a=points[i], b=points[(i+1)%points.length], dx=b.x-a.x, dz=b.z-a.z, l=Math.hypot(dx,dz)||1; sideX[i]=dz/l; sideZ[i]=dx/l; }
+  return {...r, points, lengths, sideX, sideZ, length:lengths.at(-1), open, width:r.width ?? (r.district === 'episodic' ? .54 : .88),
     clearance:open ? r.clearanceOwn : r.clearance};
 });
 // An open route folds back at its ends, so anything moving along it turns round there.
 function sampleRoute(route, distance, out = new THREE.Vector3(), offset = 0) {
+  ROUTE_ARGS[0] = distance; ROUTE_ARGS[1] = offset;
+  return sampleRouteArgs(route, out);
+}
+// The same sampling with the distance and the lane offset read from ROUTE_ARGS: a per-frame caller
+// passes no double, so nothing is boxed when the optimizer does not inline the call.
+const ROUTE_ARGS = new Float64Array(2);
+function sampleRouteArgs(route, out) {
+  const distance = ROUTE_ARGS[0], offset = ROUTE_ARGS[1];
   let s;
   if (route.open) { const L2 = 2*route.length, f = ((distance % L2)+L2)%L2; s = f > route.length ? L2-f : f; }
   else s = ((distance % route.length)+route.length)%route.length;
@@ -23,7 +35,11 @@ function sampleRoute(route, distance, out = new THREE.Vector3(), offset = 0) {
   while(lo+1<hi) { const mid=(lo+hi)>>1; if(route.lengths[mid]<=s) lo=mid; else hi=mid; }
   const a=route.points[lo], b=route.points[(lo+1)%route.points.length];
   out.lerpVectors(a,b,(s-route.lengths[lo])/(route.lengths[lo+1]-route.lengths[lo]));
-  if(offset) { const dx=b.x-a.x,dz=b.z-a.z,l=Math.hypot(dx,dz); out.x+=dz/l*offset; out.z-=dx/l*offset; }
+  // A path built elsewhere (a bridge's lamp line, a walker's bridge path) has no side table: its normal
+  // is computed here, as every route's was before the table.
+  if(offset) { const sx=route.sideX;
+    if(sx) { out.x+=sx[lo]*offset; out.z-=route.sideZ[lo]*offset; }
+    else { const dx=b.x-a.x,dz=b.z-a.z,l=Math.hypot(dx,dz); out.x+=dz/l*offset; out.z-=dx/l*offset; } }
   return out;
 }
 const streetGroup = new THREE.Group(); scene.add(streetGroup);

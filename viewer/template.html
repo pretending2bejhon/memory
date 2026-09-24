@@ -412,6 +412,7 @@ const geometryOf = kind => {
 // ------------------------------------------------------------------ scene
 const stage = document.getElementById('stage');
 const stageSize = () => [stage.clientWidth || window.innerWidth || 800, stage.clientHeight || window.innerHeight || 450];
+let viewW = stageSize()[0], viewH = stageSize()[1];
 const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(...stageSize());
@@ -436,14 +437,20 @@ function fitDistance() {
   const hfov = Math.atan(Math.tan(v) * Math.max(0.2, vw / vh));
   return Math.max(R / Math.sin(v), R / Math.sin(hfov)) * 0.98;
 }
+// Only the visitor moves the camera. A size change may refit the start view only while the camera
+// still sits where placeCamera left it; the first drag (or a requested flight) ends that.
+let visitorMoved = false, focusGoal = null;
 function placeCamera() {
   const dist = fitDistance() * (stageSize()[0]/stageSize()[1]<.8?1.48:.92), az = THREE.MathUtils.degToRad(-112), el = THREE.MathUtils.degToRad(32);
   camera.position.copy(center).add(new THREE.Vector3(dist * Math.cos(el) * Math.cos(az), dist * Math.sin(el), -dist * Math.cos(el) * Math.sin(az)));
   controls.target.copy(center);
   scene.fog = new THREE.Fog(col(DEEP), dist * 0.85, dist * 2.6);
   controls.update();
+  visitorMoved = false;
 }
 placeCamera();
+// A grab ends any automatic flight, so the visitor's drag always wins.
+controls.addEventListener('start', () => { visitorMoved = true; focusGoal = null; });
 
 // Procedural sky and stars are created by rave-light.js.
 
@@ -841,6 +848,17 @@ roadGeo.setAttribute('color', new THREE.BufferAttribute(roadCol, 3).setUsage(THR
 const roads = new THREE.LineSegments(roadGeo, new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, fog: true }));
 roads.frustumCulled = false; roads.visible = false; scene.add(roads);
 
+// The frustum this frame renders, shared by the crowd and traffic budgets.
+// The per-frame loops read the six planes from viewPlanes (normal x, y, z, constant) in their own
+// code, so testing a thousand spheres passes no double to a function call.
+const viewFrustum = new THREE.Frustum(), viewProjection = new THREE.Matrix4(), viewPlanes = new Float64Array(24);
+function updateCameraView() {
+  camera.updateMatrixWorld();
+  viewProjection.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+  viewFrustum.setFromProjectionMatrix(viewProjection);
+  for (let k = 0; k < 6; k++) { const plane = viewFrustum.planes[k]; viewPlanes[k * 4] = plane.normal.x; viewPlanes[k * 4 + 1] = plane.normal.y; viewPlanes[k * 4 + 2] = plane.normal.z; viewPlanes[k * 4 + 3] = plane.constant; }
+}
+
 __CITY_LIFE__
 
 __ROADS__
@@ -968,9 +986,9 @@ function setIsolate(d) {
   for (const l of labelEls) l.el.classList.toggle('muted', d !== null && l.d !== d);
   updateWeek(state.t);
 }
-let focusGoal = null;
 function flyTo(d) {
   stopRide();
+  visitorMoved = true;
   const p = DATA.plateaus[d];
   const target = W(p.cx, p.cy, p.z + 3.5);
   const dist = Math.max(22, Math.max(p.rx, p.ry) * 3.8);
@@ -1000,26 +1018,37 @@ const labelEls = Object.entries(DATA.plateaus).map(([d, p]) => {
   return { d, el, pos: W(p.cx, p.cy + (p.shape === 'disc' ? p.ry * 0.55 : p.ry * 0.7), p.z + 1.8) };
 });
 const tmp = new THREE.Vector3();
+// The stage size is cached by sizeView(), so a frame never reads layout after writing a style;
+// a label's style is written only when its position or visibility changes.
 function placeLabels() {
-  for (const l of labelEls) {
-    if (!labelsOn || state.ride >= 0 || (stage.clientWidth < 720 && DATA.plateaus[l.d].n < 150 && state.isolate !== l.d)) { l.el.classList.remove('on'); continue; }
-    tmp.copy(l.pos).project(camera);
-    const on = tmp.z < 1 && Math.abs(tmp.x) < 1.05 && Math.abs(tmp.y) < 1.05;
-    l.el.classList.toggle('on', on);
-    if (on) l.el.style.transform = `translate(${((tmp.x + 1) / 2 * stage.clientWidth).toFixed(1)}px, ${((1 - tmp.y) / 2 * stage.clientHeight).toFixed(1)}px) translate(-50%, -100%)`;
+  const narrow = viewW < 720;
+  for (let i = 0; i < labelEls.length; i++) {
+    const l = labelEls[i];
+    let on = false;
+    if (labelsOn && state.ride < 0 && !(narrow && DATA.plateaus[l.d].n < 150 && state.isolate !== l.d)) {
+      tmp.copy(l.pos).project(camera);
+      on = tmp.z < 1 && Math.abs(tmp.x) < 1.05 && Math.abs(tmp.y) < 1.05;
+      if (on) {
+        const x = Math.round((tmp.x + 1) / 2 * viewW * 10) / 10, y = Math.round((1 - tmp.y) / 2 * viewH * 10) / 10;
+        if (x !== l.x || y !== l.y) { l.x = x; l.y = y; l.el.style.transform = `translate(${x.toFixed(1)}px, ${y.toFixed(1)}px) translate(-50%, -100%)`; }
+      }
+    }
+    if (on !== l.on) { l.on = on; l.el.classList.toggle('on', on); }
   }
 }
 
 // picking
 const ray = new THREE.Raycaster();
-const ptr = new THREE.Vector2(); let ptrDirty = false, ptrDown = null;
+const ptr = new THREE.Vector2(); let ptrDirty = false, ptrDown = null, dragging = false;
 const tip = $('tip');
 renderer.domElement.addEventListener('pointermove', e => {
-  ptr.x = (e.clientX / stage.clientWidth) * 2 - 1; ptr.y = -(e.clientY / stage.clientHeight) * 2 + 1; ptrDirty = true;
+  ptr.x = (e.clientX / viewW) * 2 - 1; ptr.y = -(e.clientY / viewH) * 2 + 1; ptrDirty = true;
   tip.style.transform = `translate(${e.clientX + 14}px, ${e.clientY + 14}px)`;
 });
-renderer.domElement.addEventListener('pointerdown', e => { ptrDown = [e.clientX, e.clientY]; });
+renderer.domElement.addEventListener('pointerdown', e => { ptrDown = [e.clientX, e.clientY]; dragging = true; });
+renderer.domElement.addEventListener('pointercancel', () => { dragging = false; });
 renderer.domElement.addEventListener('pointerup', e => {
+  dragging = false;
   if (!ptrDown || Math.hypot(e.clientX - ptrDown[0], e.clientY - ptrDown[1]) > 5) return;
   const hit = pick(); select(hit ? hit.idx : -1);
 });
@@ -1077,7 +1106,7 @@ $('i-focus').addEventListener('click', () => {
   stopRide();
   const p = W(n.x, n.y, plateauZ(n.district) + n.h * 0.5);
   const dir = camera.position.clone().sub(controls.target).normalize();
-  focusGoal = { target: p, position: p.clone().add(dir.multiplyScalar(22)) };
+  focusGoal = { target: p, position: p.clone().add(dir.multiplyScalar(22)) }; visitorMoved = true;
 });
 
 __RIDE_CAMERA__
@@ -1100,40 +1129,92 @@ composer.addPass(bloom);
 composer.addPass(new OutputPass());
 let bloomOn = true;
 
-// Render targets for the current size and tier. A governor tier change calls only this, so a tier
-// change never puts the camera back on the overview while someone is looking around.
-function renderScale() {
-  const [w, h] = stageSize();
-  renderer.setPixelRatio(tier.current===1?1:Math.min(window.devicePixelRatio,2));
-  renderer.setSize(w, h); composer.setSize(w, h); bloom.setSize(tier.current<3?w/2:w,tier.current<3?h/2:h);
+// The render path follows the stage size and the tier's pixel ratio: Tier 1 draws the canvas at pixel
+// ratio 1, as it always has (the composer keeps the ratio it was built with). A tier change resizes the
+// bloom mips at once; entering or leaving Tier 1 reallocates the canvas and the composer, a long task,
+// so retune() waits for an idle moment and first hands the next notes to the audio thread. Neither
+// path touches the camera.
+const pixelRatio = () => tier.current === 1 ? 1 : Math.min(window.devicePixelRatio, 2);
+function bloomSize() { const half = tier.current < 3; bloom.setSize(half ? viewW / 2 : viewW, half ? viewH / 2 : viewH); }
+let sizedW = 0, sizedH = 0, sizedRatio = 0, retuning = false;
+function sizeView() {
+  const [w, h] = stageSize(), pr = pixelRatio();
+  if (w === sizedW && h === sizedH && pr === sizedRatio) return false;
+  sizedW = viewW = w; sizedH = viewH = h;
+  if (pr !== sizedRatio) { sizedRatio = pr; renderer.setPixelRatio(pr); }
+  renderer.setSize(w, h); composer.setSize(w, h); bloomSize();
   camera.aspect = w / h; camera.updateProjectionMatrix();
+  return true;
 }
+function retune() {
+  if (retuning || pixelRatio() === sizedRatio) return;
+  retuning = true;
+  const run = () => { retuning = false; if (pixelRatio() === sizedRatio) return; cityAudio.brace(0.4); sizeView(); };
+  if (window.requestIdleCallback) requestIdleCallback(run, { timeout: 1000 }); else setTimeout(run, 100);
+}
+// A real size change (the window listener and the ResizeObserver both report it; the second call
+// finds nothing to do) refits the start view only if the visitor has not moved the camera since
+// placeCamera last put it there.
 function resize() {
-  renderScale();
-  if (state.ride < 0 && state.isolate === null && !focusGoal) placeCamera();
+  if (!sizeView()) return;
+  if (!visitorMoved && state.ride < 0 && state.isolate === null && !focusGoal) placeCamera();
 }
 window.addEventListener('resize', resize);
 if (window.ResizeObserver) new ResizeObserver(resize).observe(stage);
-resize();
+sizeView();
+
+// Nothing but the beacon moves after setup, so the scene graph stops recomposing static matrices.
+// Everything else that moves does it inside its buffers, never through its object's transform: the
+// vehicles and light cycles (instance matrices), the cycle trails (trail positions), the bridge light
+// packets (deck uniforms), the walkers on bridges and every person (instance matrices), the lasers,
+// beams, screens and cranes (instance matrices). The frozen objects keep their world matrices.
+function freezeStatic() {
+  scene.traverse(object => { if (object === beaconGroup) return; object.updateMatrix(); object.matrixAutoUpdate = false; });
+  scene.updateMatrixWorld(true);
+}
 
 const clock = new THREE.Clock();
 updateWeek(LAST);
 tier.apply();
 rave.update(0);
+freezeStatic();
 const compilation = compileWorld();
 window.__vc = { rave, beat, lights, tier, crowd, venues, stages, roads: roadNet, compilation, scene, cityMat, placeCamera, flyTo, audio: cityAudio, setIsolate, carState, cars, nodes, kinds, edges, state, routes, sampleRoute, poseOnRoute, pointBlocked, clearSight, camera, controls, renderer, people, peopleGroup, startRide, stopRide, updateWeek };
 $('city-census').textContent = DATA.districts.length + ' districts / ' + nodes.length.toLocaleString() + ' addresses';
 $('loading').classList.add('ready');
-// C13.2: the governor climbs on the work a frame takes (this function, render included), measured
-// here and passed with the next frame's interval.
-let frameWorkMs = 0;
+// The governor ignores the first seconds after load, after the Sound gesture (the context, Strudel
+// and the first room load on this thread) and after the tab comes back from the background.
+tier.hold(2000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) tier.hold(1500); });
+let soundState = cityAudio.state;
+cityAudio.subscribe(audio => { if (audio.state !== soundState) { soundState = audio.state; if (soundState === 'starting' || soundState === 'on') tier.hold(3000); } });
+// C13.2: the governor climbs on the work a frame takes (frame() itself, render included), measured at
+// the end of each frame and passed with the next frame's interval.
+let workMs = 0, audioProbeWall = 0, audioProbeTime = -1;
+// Every two seconds, how fast the audio clock ran against the wall clock (1 when the audio thread keeps
+// up). With the 0.1 s output buffer the clock advances in steps of up to about 45 ms, so a two-second
+// window reads within about 2 % and only a real shortfall (the music cutting out) falls below 0.95.
+// The first two seconds after the sound starts (or the tab returns) are skipped: a device that is
+// still opening runs its clock late without anything being wrong.
+function probeAudio(now) {
+  const ctx = cityAudio.ctx;
+  if (!cityAudio.enabled || !ctx || ctx.state !== 'running' || document.hidden) { audioProbeWall = 0; return; }
+  if (!audioProbeWall) { audioProbeWall = now + 2000; audioProbeTime = -1; return; }
+  if (now < audioProbeWall) return;
+  if (audioProbeTime < 0) { audioProbeWall = now; audioProbeTime = ctx.currentTime; return; }
+  if (now - audioProbeWall < 2000) return;
+  tier.audio((ctx.currentTime - audioProbeTime) * 1000 / (now - audioProbeWall));
+  audioProbeWall = now; audioProbeTime = ctx.currentTime;
+}
 function frame() {
   requestAnimationFrame(frame);
-  const workStart = performance.now();
+  const frameStart = performance.now();
+  probeAudio(frameStart);
   renderer.info.reset();
   const elapsed = clock.getDelta();
-  tier.update(elapsed*1000, frameWorkMs);
-  beat.update(performance.now());
+  // Frame interval and the previous frame's own work time feed the governor.
+  if (!document.hidden && frameStart >= tier.holdUntil) tier.update(elapsed * 1000, workMs);
+  beat.update(frameStart);
   lights.update(elapsed);
   rave.update(elapsed);
   if (roadNet && roadNet.update) roadNet.update();
@@ -1145,23 +1226,28 @@ function frame() {
     if (t >= LAST) { state.playing = false; $('play').textContent = 'Replay'; }
   }
   if (focusGoal) {
-    controls.target.lerp(focusGoal.target, 0.08); camera.position.lerp(focusGoal.position, 0.08);
+    // Frame-rate independent: 0.08 per frame at 60 fps.
+    const k = 1 - Math.pow(0.92, dt * 60);
+    controls.target.lerp(focusGoal.target, k); camera.position.lerp(focusGoal.position, k);
     if (camera.position.distanceTo(focusGoal.position) < 0.05) focusGoal = null;
   }
+  // The camera settles first, so crowd and traffic cull against the frustum this frame renders.
+  // No hover raycast while a drag is orbiting the camera.
+  if (state.ride >= 0) updateRide(dt);
+  else { if (ptrDirty && !dragging) { ptrDirty = false; const hit = pick(); setHover(hit ? hit.idx : -1); } controls.update(); }
+  updateCameraView();
   updateCars(reduced ? 0 : dt);
   updatePeople(reduced ? 0 : dt, now);
   updateStages();
   updateAtmosphere(reduced ? 0 : now);
-  craneNodes.forEach((n, k) => { dummy.position.copy(n.craneBase); dummy.rotation.set(0, (reduced ? 0 : now * 0.12) + k * 1.3, 0); dummy.scale.set(1, n.state === 'absent' ? 0.0001 : n.h + 1.4, 1); dummy.updateMatrix(); cranes.mesh.setMatrixAt(k, dummy.matrix); });
+  for (let k = 0; k < craneNodes.length; k++) { const n = craneNodes[k]; dummy.position.copy(n.craneBase); dummy.rotation.set(0, (reduced ? 0 : now * 0.12) + k * 1.3, 0); dummy.scale.set(1, n.state === 'absent' ? 0.0001 : n.h + 1.4, 1); dummy.updateMatrix(); cranes.mesh.setMatrixAt(k, dummy.matrix); }
   cranes.mesh.instanceMatrix.needsUpdate = true;
   beaconGroup.rotation.y = reduced ? 0 : now * 0.35;
-  if (state.ride >= 0) updateRide(dt);
-  else { if (ptrDirty) { ptrDirty = false; const hit = pick(); setHover(hit ? hit.idx : -1); } controls.update(); }
   cityMat.uniforms.uTime.value = reduced ? 0 : now;
   cityMat.uniforms.uDressTime.value = reduced ? 0 : now;
   placeLabels();
   if (bloomOn) composer.render(); else renderer.render(scene, camera);
-  frameWorkMs = performance.now() - workStart;
+  workMs = performance.now() - frameStart;
 }
 frame();
 </script>

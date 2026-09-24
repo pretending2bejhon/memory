@@ -518,7 +518,7 @@ const vehicleRnd=mulberry(4242),carState=[];
       // A pulled-in taxi's outer side stops at the kerb: the Archive carriageway is 0.54 wide (0.10 lane plus
       // 0.095 plus a 0.075 half width reaches 0.27), a ring 0.88 (0.12 plus 0.22 plus 0.075 leaves 0.025).
       carState.push({type,route:ri,district:route.district,distance:(k+vehicleRnd()*.6)/list.length*route.length,dir:k%2?1:-1,speed,cruise:speed,target:speed,
-        lane:(archive?.1:.12)+(two?.04:0),pullBy:archive?.095:.22,half:VEHICLE_HALF[type],dodge:-0,pull:-0,mode:0,timer:type==='taxi'?1+vehicleRnd()*5:4+vehicleRnd()*12,goal:-0,brake:0,on:true,
+        lane:(archive?.1:.12)+(two?.04:0),pullBy:archive?.095:.22,half:VEHICLE_HALF[type],dodge:-0,pull:-0,mode:0,timer:type==='taxi'?1+vehicleRnd()*5:4+vehicleRnd()*12,goal:-0,brake:0,on:true,drawn:false,
         pose:newPose(),rank:0});
     });});
   // Stratified ranks: any prefix holds each type in proportion, so a tier keeps 60 % of each type.
@@ -707,9 +707,14 @@ function leaderOf(k,c){
 // swings toward the centre line to pass (C5.3). Stopped taxis are listed per road without allocating.
 const BLOCK_MAX=32,blockS=routes.map(()=>new Float32Array(BLOCK_MAX)),blockDir=routes.map(()=>new Int8Array(BLOCK_MAX)),blockCar=routes.map(()=>new Int16Array(BLOCK_MAX)),blockCount=new Int16Array(routes.length);
 const vehicleList=Object.values(vehicleMeshes);
+// Traffic budget: every car keeps driving, but one outside the frustum rewrites its matrix only every
+// eighth frame (staggered); a car that was just switched on is always written at once.
+let carFrame=0;
+const trafficState={written:0,culled:0};cars.budget=trafficState;
 function updateCars(dt){
   if(!NET)return;
-  const bar=beat.barSeconds;
+  const bar=beat.barSeconds,frameIndex=carFrame++;
+  let written=0,culled=0;
   blockCount.fill(0);
   for(let k=0;k<carState.length;k++){const c=carState[k];if(c.type!=='taxi'||!c.on||c.pull<.35||c.route<0)continue;const r=c.route;
     if(routes[r].district!=='episodic'||blockCount[r]>=BLOCK_MAX)continue;const n=blockCount[r]++;
@@ -717,7 +722,7 @@ function updateCars(dt){
   buildLanes();buildMerges();
   for(let k=0;k<carState.length;k++){
     const c=carState[k],arr=c.mesh.instanceMatrix.array,o=c.slot*16;
-    if(c.rank>=visibleVehicles||c.tk<0){if(c.on){for(let j=0;j<16;j++)arr[o+j]=0;c.on=false;c.mode=0;c.pull=0;c.speed=c.cruise;}continue;}
+    if(c.rank>=visibleVehicles||c.tk<0){if(c.on){for(let j=0;j<16;j++)arr[o+j]=0;c.on=false;c.mode=0;c.pull=0;c.speed=c.cruise;}c.drawn=false;continue;}
     c.on=true;c.timer-=dt;
     let track=TRACKS[c.tk],routed=track.total>0,rs=0,L=track.total;
     if(routed){rs=track.s0+(c.td>0?c.q:track.length-c.q);rs=((rs%L)+L)%L;}
@@ -758,10 +763,18 @@ function updateCars(dt){
     const want=c.lane+c.pull*c.pullBy-c.dodge*(c.lane-Math.min(c.lane,.11-c.half)),ease=dt*.6;
     c.lat+=Math.max(-ease,Math.min(ease,want-c.lat));
     if(c.pull>0||c.dodge>0)c.lat=want;
+    // The traffic budget: a drawn vehicle outside the frustum (tested at its last pose) keeps driving but
+    // rewrites its matrix and pose only on its eighth frame.
+    if(c.drawn&&((k+frameIndex)&7)){
+      const P=c.pose,px=P[POSE_X],py=P[POSE_Y]+.1,pz=P[POSE_Z];let outside=false;
+      for(let q=0;q<24;q+=4)if(viewPlanes[q]*px+viewPlanes[q+1]*py+viewPlanes[q+2]*pz+viewPlanes[q+3]<-.6){outside=true;break;}
+      if(outside){culled++;continue;}
+    }
     placeOnPath(c,arr,o);
-    c.mesh.geometry.attributes.aBrake.array[c.slot]=c.brake;
+    c.mesh.geometry.attributes.aBrake.array[c.slot]=c.brake;c.drawn=true;written++;
   }
   for(let i=0;i<vehicleList.length;i++){const mesh=vehicleList[i];mesh.instanceMatrix.needsUpdate=true;mesh.geometry.attributes.aBrake.needsUpdate=true;}
+  trafficState.written=written;trafficState.culled=culled;
   buildLanes();
   updateCycles(dt);
 }
