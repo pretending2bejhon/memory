@@ -71,14 +71,99 @@ const cityAudio = (() => {
   let preferred = 'off', state = 'off', rideHeading = null, pending = null, serial = 0, startToken = 0;
   const buses = [], listeners = new Set(), timeline = {}, waveCurves = new Map();
   const compiled = new Map(), orbitTargets = new Map(), preloaded = new Map();
-  // Sample the device clock on the existing scheduler, outside the render loop.
-  const outputClock = {contextTime: 0, performanceTime: 0, outputLatency: 0, timestamp: false};
-  function sampleOutputClock() {
-    outputClock.outputLatency = Number(ctx.outputLatency) || Number(ctx.baseLatency) || 0;
+  // The device clock. Every correct getOutputTimestamp() pair lies on one line of slope 1: the context
+  // time heard at a performance time is that time / 1000 plus `offset`. One pair read on its own is not
+  // reliable with the 0.1 s output buffer: Chrome then renders this page in 0.1 s bursts, the pair runs
+  // ahead during a burst and its context time is clamped to currentTime, so for most of every burst
+  // period the latest pair sits below the line by up to a few hundred milliseconds (measured on this
+  // page), and a correct pair never sits above it by more than about a millisecond. The clock therefore
+  // keeps every new pair it reads for one second and takes the highest offset, the upper envelope, which
+  // is the line. It reads on every frame, on the scheduler and on its own 7 ms timer while the sound is
+  // on: a pair is on the line for only the first few milliseconds of each burst, and 0.1 s is exactly six
+  // 60 Hz frames and four scheduler ticks, so those two alone can miss every burst for seconds on end.
+  // Two kinds of pair can sit above the line and are never kept: a stale one (its performance time long
+  // past, left from before a suspension) and those of the first bursts after the context starts, while
+  // the device settles (measured 28 ms high, and later than the settle time now and then). A pair that
+  // trails the currentTime read just before it by a few render quanta was not clamped (trusted). The
+  // clock becomes valid once trusted pairs more than a burst apart agree; a trusted pair well below the
+  // envelope before then shows the envelope came from a settling pair, and the window starts again from
+  // it. While valid, when several trusted pairs over more than a burst all sit well below the envelope,
+  // the line itself moved down (an output glitch) and the clock resyncs to them at once instead of a
+  // second later. Only an engine that never gives a trusted pair falls back to the envelope after 3 s.
+  const CLOCK_WINDOW = 1000, CLOCK_JUMP = .004, CLOCK_RING = 512, CLOCK_STALE = 500, CLOCK_FALLBACK = 3000;
+  const outputClock = {contextTime: 0, performanceTime: 0, outputLatency: 0, timestamp: false,
+    offset: 0, valid: false, samples: 0, kept: 0, trusted: 0, starts: 0, resyncs: 0, rawErrorMs: 0,
+    rises: 0, falls: 0, lastMoveMs: 0, maxMoveMs: 0, sample: sampleOutputClock};
+  const clockAt = new Float64Array(CLOCK_RING), clockOffset = new Float64Array(CLOCK_RING);
+  let clockHead = 0, clockCount = 0, clockRunning = false, clockSince = 0, clockLow = 0, clockLowAt = 0, clockAgreeAt = 0, clockAgreeOffset = 0;
+  let clockTimer = null, lastContextTime = -1, lastPerformanceTime = -1;
+  function resetOutputClock(now = performance.now()) {
+    clockHead = 0; clockCount = 0; clockLow = 0; clockAgreeAt = 0; clockSince = now; outputClock.valid = false; outputClock.starts++;
+    lastContextTime = -1; lastPerformanceTime = -1;
+  }
+  function clockLine() {
+    let line = -Infinity;
+    for (let i = 0, j = clockHead; i < clockCount; i++, j = (j + 1) % CLOCK_RING) if (clockOffset[j] > line) line = clockOffset[j];
+    return line;
+  }
+  function sampleOutputClock(now = performance.now()) {
+    if (!ctx || ctx.state !== 'running') { clockRunning = false; return outputClock; }
+    // A suspended context stops its clock, which moves the line: start again whenever it runs again.
+    if (!clockRunning) { clockRunning = true; resetOutputClock(now); }
+    const latency = outputClock.outputLatency = Number(ctx.outputLatency) || Number(ctx.baseLatency) || 0;
+    // currentTime is read before the pair: it can advance within one task (a burst renders meanwhile), and
+    // a clamped pair read after it could then look as if it trailed it.
+    const rendered = ctx.currentTime;
     const stamp = typeof ctx.getOutputTimestamp === 'function' ? ctx.getOutputTimestamp() : null;
-    outputClock.timestamp = !!(stamp && stamp.performanceTime > 0 && Number.isFinite(stamp.contextTime));
-    outputClock.contextTime = outputClock.timestamp ? stamp.contextTime : ctx.currentTime - outputClock.outputLatency;
-    outputClock.performanceTime = outputClock.timestamp ? stamp.performanceTime : performance.now();
+    const timestamp = outputClock.timestamp = !!(stamp && stamp.performanceTime > 0 && Number.isFinite(stamp.contextTime));
+    const contextTime = outputClock.contextTime = timestamp ? stamp.contextTime : ctx.currentTime - latency;
+    const performanceTime = outputClock.performanceTime = timestamp ? stamp.performanceTime : now;
+    const offset = contextTime - performanceTime / 1000;
+    outputClock.samples++;
+    // Older engines without output timestamps map through currentTime minus the reported latency. An engine
+    // that has them but returns an empty pair (right after a resume) adds nothing.
+    if (!stamp) { outputClock.offset = offset; outputClock.valid = true; outputClock.rawErrorMs = 0; return outputClock; }
+    if (!timestamp) return outputClock;
+    // Between bursts the device repeats its last pair; only a new one adds anything.
+    if (contextTime === lastContextTime && performanceTime === lastPerformanceTime) return outputClock;
+    lastContextTime = contextTime; lastPerformanceTime = performanceTime;
+    const settle = 150 + 1500 * (Number(ctx.baseLatency) || 0);
+    if (now - clockSince < settle || performanceTime < now - CLOCK_STALE) {
+      if (clockCount) outputClock.rawErrorMs = (offset - outputClock.offset) * 1000;
+      return outputClock;
+    }
+    while (clockCount && clockAt[clockHead] < now - CLOCK_WINDOW) { clockHead = (clockHead + 1) % CLOCK_RING; clockCount--; }
+    if (clockCount === CLOCK_RING) { clockHead = (clockHead + 1) % CLOCK_RING; clockCount--; }
+    const slot = (clockHead + clockCount) % CLOCK_RING;
+    clockAt[slot] = now; clockOffset[slot] = offset; clockCount++; outputClock.kept++;
+    const wasValid = outputClock.valid && clockCount > 1;
+    let line = clockLine();
+    const burst = Math.max(50, 1500 * (Number(ctx.baseLatency) || 0)), trusted = rendered - contextTime >= 4 * 128 / ctx.sampleRate;
+    if (trusted) outputClock.trusted++;
+    if (trusted && !outputClock.valid) {
+      if (offset < line - CLOCK_JUMP) {
+        // The envelope came from a settling pair: start the window again from this one.
+        clockHead = (clockHead + clockCount - 1) % CLOCK_RING; clockCount = 1; line = offset; clockAgreeAt = now;
+      } else if (!clockAgreeAt || offset > clockAgreeOffset + CLOCK_JUMP) clockAgreeAt = now;
+      else if (now - clockAgreeAt >= burst) outputClock.valid = true;
+      if (clockAgreeAt === now) clockAgreeOffset = offset;
+    } else if (trusted) {
+      if (offset >= line - CLOCK_JUMP) clockLow = 0;
+      else if (!clockLow++) clockLowAt = now;
+      else if (clockLow >= 3 && now - clockLowAt >= burst) {
+        // Keep only the pairs read since the line moved.
+        while (clockCount && clockAt[clockHead] < clockLowAt) { clockHead = (clockHead + 1) % CLOCK_RING; clockCount--; }
+        line = clockLine(); clockLow = 0; outputClock.resyncs++;
+      }
+    } else if (!outputClock.valid && !clockAgreeAt && now - clockSince > settle + CLOCK_FALLBACK) outputClock.valid = true;
+    // Read-only record of every move of the line larger than a jump (the picture closes each over a bar).
+    const moved = line - outputClock.offset;
+    if (wasValid && Math.abs(moved) > CLOCK_JUMP) {
+      if (moved > 0) outputClock.rises++; else outputClock.falls++;
+      outputClock.lastMoveMs = moved * 1000; outputClock.maxMoveMs = Math.max(outputClock.maxMoveMs, Math.abs(moved) * 1000);
+    }
+    outputClock.offset = line; outputClock.rawErrorMs = (offset - line) * 1000;
+    return outputClock;
   }
   // One stable slot per event: the renderer consumes this without creating event objects.
   const hitRing = {capacity: 512, written: 0, read: 0, dropped: 0,
@@ -109,6 +194,7 @@ const cityAudio = (() => {
   const diagnostics = {switches: [], scheduledSteps: 0, scheduledVoices: 0, droppedSteps: 0, voiceErrors: 0,
     compileErrors: {}, bpm: BPM, timerMs: 25, lookaheadSeconds: LOOKAHEAD, commitSeconds: COMMIT, lateSeconds: LATE, latencyHint: OUTPUT_LATENCY,
     lateShifted: 0, lateDropped: 0, workerTicks: 0, braces: 0, sixteenthSeconds: SIXTEENTH,
+    gainsCreated: 0, gainsReused: 0, gainsReleased: 0,
     engine: 'strudel', strudel: STRUDEL_URL};
   try { preferred = localStorage.getItem('vc-sound') === 'on' ? 'on' : 'off'; } catch (_) {}
   if (preferred === 'on') state = 'waiting';
@@ -130,6 +216,63 @@ const cityAudio = (() => {
     waveCurves.set(key, result);
     return result;
   }
+  // Strudel builds four or five gain nodes for every voice (about 155 a second here, through
+  // createGain() and `new GainNode`) and lets them go when the voice ends. Chrome deletes dead audio
+  // nodes only after a full garbage collection, which this page, allocating little, gets about every
+  // 100 s, and then deletes the nodes of those 100 s in one main-thread task of well over 100 ms: a
+  // hitch in the picture. So this context hands a released gain out again instead of making a new one.
+  // A gain counts as released when it is disconnected with no arguments inside an `ended` event of this
+  // context, which is how a Strudel voice and the riser let their nodes go. It then waits a second
+  // (whatever still fed it from its own voice has stopped by then), leaves the wait if anything connects
+  // it again, and comes back with its automation cancelled and its defaults (or the constructor's
+  // options) restored, so it plays exactly as a new node would. Only the garbage changes. Every other
+  // context and every other kind of node is left alone.
+  const RECYCLE_WAIT = 1, RECYCLE_MAX = 4096;
+  function recycleGains() {
+    const create = ctx.createGain.bind(ctx), connect = AudioNode.prototype.connect, disconnect = AudioNode.prototype.disconnect;
+    const NativeGain = window.GainNode, waiting = [], spare = [];
+    let head = 0;
+    function release() {
+      disconnect.apply(this, arguments);
+      const event = window.event;
+      if (arguments.length || this.recycleAt || event?.type !== 'ended' || event.target?.context !== ctx) return;
+      if (waiting.length - head >= 2 * RECYCLE_MAX || spare.length >= RECYCLE_MAX) return;
+      this.recycleAt = ctx.currentTime + RECYCLE_WAIT; waiting.push(this, this.recycleAt); diagnostics.gainsReleased++;
+    }
+    function use() { this.recycleAt = 0; return connect.apply(this, arguments); }
+    function adopt(node) { node.recycleAt = 0; node.disconnect = release; node.connect = use; diagnostics.gainsCreated++; return node; }
+    function reuse(options) {
+      const now = ctx.currentTime;
+      while (head < waiting.length && waiting[head + 1] <= now) {
+        const node = waiting[head];
+        // An entry is stale when the gain was connected again or released again since.
+        if (node.recycleAt === waiting[head + 1]) { node.recycleAt = -1; spare.push(node); }
+        waiting[head] = null; head += 2;
+      }
+      if (head >= 8192) { waiting.splice(0, head); head = 0; }
+      let node;
+      while ((node = spare.pop()) && node.recycleAt !== -1);
+      if (!node) return null;
+      node.recycleAt = 0; node.gain.cancelScheduledValues(0);
+      const count = options?.channelCount ?? 2, mode = options?.channelCountMode ?? 'max';
+      const interpretation = options?.channelInterpretation ?? 'speakers';
+      if (node.channelCount !== count) node.channelCount = count;
+      if (node.channelCountMode !== mode) node.channelCountMode = mode;
+      if (node.channelInterpretation !== interpretation) node.channelInterpretation = interpretation;
+      node.gain.value = options?.gain ?? 1;
+      diagnostics.gainsReused++;
+      return node;
+    }
+    ctx.createGain = () => reuse() || adopt(create());
+    // Strudel also builds gains with the constructor; only those of this context take the same path.
+    function GainNode(context, options) {
+      if (!new.target) return NativeGain(context, options);
+      if (context !== ctx) return new NativeGain(context, options);
+      return reuse(options) || adopt(new NativeGain(context, options));
+    }
+    GainNode.prototype = NativeGain.prototype;
+    window.GainNode = GainNode;
+  }
   function gain(value = 1) { const node = ctx.createGain(); node.gain.value = value; return node; }
   function filter(type, hz, q = .7) { const node = ctx.createBiquadFilter(); node.type = type; node.frequency.value = hz; node.Q.value = q; return node; }
   function follow(param, value, at = ctx.currentTime) { param.setTargetAtTime(value, at, SMOOTH); }
@@ -142,6 +285,7 @@ const cityAudio = (() => {
     // (getOutputTimestamp), so the only change is that a busy machine no longer starves the device.
     // On this laptop under load it cut output underruns about tenfold (the music cutting out).
     ctx = new AudioConstructor({latencyHint: OUTPUT_LATENCY});
+    recycleGains();
     const impulse = ctx.createBuffer(2, Math.ceil(ctx.sampleRate * 2.4), ctx.sampleRate);
     compressor = ctx.createDynamicsCompressor();
     compressor.threshold.value = -12; compressor.knee.value = 12; compressor.ratio.value = 3;
@@ -538,6 +682,7 @@ const cityAudio = (() => {
   const TICKER = 'let id=0;onmessage=e=>{clearInterval(id);id=e.data>0?setInterval(()=>postMessage(0),e.data):0;};';
   function startClock() {
     scheduler(); timer = setInterval(scheduler, 25);
+    clockTimer ??= setInterval(() => sampleOutputClock(), 7);
     try {
       if (!ticker) {
         const url = URL.createObjectURL(new Blob([TICKER], {type: 'text/javascript'}));
@@ -561,7 +706,9 @@ const cityAudio = (() => {
     braceTo = ctx.currentTime + clamp(seconds, 0, 1); diagnostics.braces++;
     scheduler(); return true;
   }
-  function stopClock() { clearInterval(timer); timer = null; if (ticker) ticker.postMessage(0); }
+  function stopClock() {
+    clearInterval(timer); timer = null; clearInterval(clockTimer); clockTimer = null; if (ticker) ticker.postMessage(0);
+  }
   function setRoom(id) {
     const next = Object.hasOwn(rooms, id) ? id : 'skyline', source = rooms[next].source || next;
     // A room that has not compiled yet compiles here, outside the transport, after the notes of the
@@ -585,7 +732,7 @@ const cityAudio = (() => {
       const token = ++startToken;
       try {
         if (!ctx) createContext();
-        await ctx.resume(); enabled = true; preferred = 'on'; state = 'on';
+        await ctx.resume(); resetOutputClock(); enabled = true; preferred = 'on'; state = 'on';
         master.gain.cancelScheduledValues(ctx.currentTime); follow(master.gain, .8);
         startClock();
         loadStrudel().then(() => { if (token === startToken) notify(); });

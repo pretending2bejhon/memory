@@ -145,7 +145,7 @@ const skyBeamMat=new THREE.ShaderMaterial({transparent:true,blending:THREE.Addit
     }`,
   fragmentShader:`varying float vHeight,vEdge;varying vec3 vColor;uniform float uEnergy,uCut,uKick;
     #include <fog_pars_fragment>
-    void main(){float edge=pow(max(0.0,sin(vEdge*3.14159265)),1.6);gl_FragColor=vec4(vColor,edge*pow(1.0-vHeight,1.4)*(.16+.05*uKick)*uEnergy*uCut);
+    void main(){float edge=pow(max(0.0,sin(vEdge*3.14159265)),1.6);gl_FragColor=vec4(vColor,edge*pow(max(1.0-vHeight,0.0),1.4)*(.16+.05*uKick)*uEnergy*uCut);
       #include <fog_fragment>
       #include <colorspace_fragment>
     }`});

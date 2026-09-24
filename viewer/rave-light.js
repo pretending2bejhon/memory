@@ -230,9 +230,9 @@ const rave = (() => {
         float horizon=exp(-h*9.0),ceiling=smoothstep(-.04,.14,d.y);
         vec2 cloudUV=d.xz/(.22+h)*2.8+vec2(uTime*.007,-uTime*.004);
         float cloud=noise(cloudUV)*.65+noise(cloudUV*2.1)*.35;
-        float deck=smoothstep(.43,.78,cloud)*exp(-pow((h-.17)*5.0,2.0));
+        float deck=smoothstep(.43,.78,cloud)*exp(-pow(abs((h-.17)*5.0),2.0));
         float az=atan(d.z,d.x),ribbon=sin(az*5.0+sin(az*2.0+uTime*.033)*2.0+uTime*.012);
-        float aurora=exp(-pow((h-.29-ribbon*.10)*17.0,2.0))*(.4+.6*noise(vec2(az*6.0,h*11.0+uTime*.04)));
+        float aurora=exp(-pow(abs((h-.29-ribbon*.10)*17.0),2.0))*(.4+.6*noise(vec2(az*6.0,h*11.0+uTime*.04)));
         vec3 base=mix(uNight,vec3(.005,.009,.021),smoothstep(0.0,.75,h));
         vec3 glow=paint*horizon*(.075+uKick*.07+uRiser*.03)+paint*deck*(.065+uFlash*.12);
         glow+=accent*aurora*(.05+uPad*.06+uStab*.04);
@@ -259,7 +259,7 @@ const rave = (() => {
     fragmentShader:`varying vec3 vWorld;uniform vec3 uColor,uNight;uniform float uClock,uEnergy,uSourceIntensity,uCut,uBass;uniform vec4 uRipples[16];
       float line(vec2 p){vec2 w=max(fwidth(p),vec2(.001));vec2 g=abs(fract(p-.5)-.5)/w;return 1.0-min(min(g.x,g.y),1.0);}
       void main(){vec2 p=vWorld.xz;float minor=line(p),major=line(p/8.0),rings=0.0;
-        for(int i=0;i<16;i++){float age=uClock-uRipples[i].z;float radius=age*20.0;float on=step(0.0,age)*step(age,1.5);float ring=exp(-pow((length(p-uRipples[i].xy)-radius)*1.7,2.0));rings+=ring*on*(1.0-age/1.5)*uRipples[i].w;}
+        for(int i=0;i<16;i++){float age=uClock-uRipples[i].z;float radius=age*20.0;float on=step(0.0,age)*step(age,1.5);float ring=exp(-pow(abs((length(p-uRipples[i].xy)-radius)*1.7),2.0));rings+=ring*on*(1.0-age/1.5)*uRipples[i].w;}
         vec3 c=uNight*.65+uColor*((minor*.028+major*.075)*(.35+uEnergy)+rings*(.2+uBass*.04)*uEnergy*uSourceIntensity)*uCut;
         gl_FragColor=vec4(c,1.0);
         #include <colorspace_fragment>
@@ -273,6 +273,10 @@ const rave = (() => {
   const core=DATA.plateaus.core,coreNodes=nodes.filter(n=>n.district==='core').sort((a,b)=>b.h-a.h),towers=nodes.filter(n=>n.district==='working').sort((a,b)=>b.h-a.h);
   const laserHosts=[],laserOrigins=[];
   for(let i=0;i<14;i++){laserHosts.push(i<8?coreNodes[0]:towers[Math.floor((i-8)/2)]);laserOrigins.push(new THREE.Vector3());}
+  // Beam heights run 0 to 1 up the cylinder, but the interpolated height can land a hair above 1 at the tip.
+  // pow() of a negative base is undefined (NaN on this machine's GPU), and one NaN pixel in the additive
+  // beams turned whole bloom tiles, up to the entire frame, exact black for a frame: so every beam fade
+  // clamps its base, and the squared falloffs square an absolute value.
   const beamVertex=`varying vec2 vUV;varying float vHeight;
     #include <fog_pars_vertex>
     void main(){vUV=uv;vHeight=position.y;vec4 mvPosition=modelViewMatrix*instanceMatrix*vec4(position,1.0);gl_Position=projectionMatrix*mvPosition;
@@ -281,7 +285,7 @@ const rave = (() => {
   const beamMaterial=new THREE.ShaderMaterial({uniforms,transparent:true,blending:THREE.AdditiveBlending,depthWrite:false,side:THREE.DoubleSide,forceSinglePass:true,fog:true,
     vertexShader:beamVertex,fragmentShader:`varying vec2 vUV;varying float vHeight;uniform vec3 uColor,uNight;uniform float uEnergy,uSourceIntensity,uCut,uDesaturate,uStab,uRiser;
       #include <fog_pars_fragment>
-      void main(){float edge=pow(max(0.0,sin(vUV.x*3.14159265)),.45),fade=pow(1.0-vHeight,.7);vec3 c=mix(uColor,uNight*4.0,uDesaturate*.8)*(.48+uStab*.28+uRiser*.12);
+      void main(){float edge=pow(max(0.0,sin(vUV.x*3.14159265)),.45),fade=pow(max(1.0-vHeight,0.0),.7);vec3 c=mix(uColor,uNight*4.0,uDesaturate*.8)*(.48+uStab*.28+uRiser*.12);
         gl_FragColor=vec4(c,edge*fade*.70*uEnergy*uSourceIntensity*uCut);
         #include <fog_fragment>
         #include <colorspace_fragment>
@@ -293,7 +297,7 @@ const rave = (() => {
   const searchMaterial=new THREE.ShaderMaterial({uniforms,transparent:true,blending:THREE.AdditiveBlending,depthWrite:false,side:THREE.DoubleSide,forceSinglePass:true,fog:true,
     vertexShader:beamVertex,fragmentShader:`varying vec2 vUV;varying float vHeight;uniform vec3 uAccent;uniform float uEnergy,uSourceIntensity,uCut;
       #include <fog_pars_fragment>
-      void main(){float edge=pow(max(0.0,sin(vUV.x*3.14159265)),1.3);gl_FragColor=vec4(uAccent*.65,edge*pow(1.0-vHeight,1.2)*.10*uEnergy*uSourceIntensity*uCut);
+      void main(){float edge=pow(max(0.0,sin(vUV.x*3.14159265)),1.3);gl_FragColor=vec4(uAccent*.65,edge*pow(max(1.0-vHeight,0.0),1.2)*.10*uEnergy*uSourceIntensity*uCut);
         #include <fog_fragment>
         #include <colorspace_fragment>
       }`

@@ -19,26 +19,30 @@ function createBeat(audio) {
   const diagnostics = {frame: 0, releasedHits: 0, audioHits: 0, silentHits: 0, lateHits: 0,
     maxHitLateMs: 0, ringDropped: 0, barSeconds: BAR, silentOriginMs: startMs,
     source: 'silent', sourceChanges: 0, phaseCorrectionSeconds: 0, correctionStartMs: startMs, audioErrorSeconds: 0, outputLatency: 0,
-    outputTimestamp: false, lastFrameMs: 0, lastUpdateMs: startMs, frameGapMs: 0};
+    outputTimestamp: false, outputOffset: 0, clockSteps: 0, lastFrameMs: 0, lastUpdateMs: startMs, frameGapMs: 0};
   let frameMs = startMs, lastMs = startMs, elapsed = 0, anchorMs = startMs, anchorSeconds = 0;
   let sound = false, correction = 0, correctionStart = startMs, previousBeat = -1, previousBar = -1;
   let silentEighth = -1, silentWrite = 0, room = audio.desired || 'skyline', desired = room;
-  let audioStart = -Infinity, audioDrop = -Infinity, audioTo = '', outputNow = 0;
+  let audioStart = -Infinity, audioDrop = -Infinity, audioTo = '', outputNow = 0, outputOffset = 0;
+  // A step of the device clock line larger than this (an output glitch) is closed over one bar.
+  const CLOCK_STEP = .004;
   const modulo = (value, divisor) => ((value % divisor) + divisor) % divisor;
   function emit(name, value) {
     const list = events[name];
     for (let i = 0; i < list.length; i++) list[i](value);
   }
-  // getOutputTimestamp already describes the sample currently leaving the device.
-  // Subtracting outputLatency again would delay the picture twice. Older engines use
-  // currentTime minus their reported output latency as the fallback mapping.
+  // The context time heard at a performance time, through the device clock line city-audio estimates
+  // from many getOutputTimestamp() pairs (slope 1, see outputClock there). A pair already describes the
+  // sample leaving the device, so outputLatency is not subtracted again. Older engines map through
+  // currentTime minus their reported output latency.
   function audibleTime(atMs = performance.now()) {
     const ctx = audio.ctx;
     if (!ctx) return 0;
     const clock = audio.outputClock;
     diagnostics.outputLatency = clock.outputLatency;
     diagnostics.outputTimestamp = clock.timestamp;
-    return clock.contextTime + (atMs - clock.performanceTime) / 1000;
+    diagnostics.outputOffset = clock.offset;
+    return atMs / 1000 + clock.offset;
   }
   function clockSeconds(atMs, audioTime) {
     if (!sound) return anchorSeconds + (atMs - anchorMs) / 1000;
@@ -147,8 +151,17 @@ function createBeat(audio) {
   function update(atMs = performance.now()) {
     frameMs = atMs; diagnostics.frame++; diagnostics.frameGapMs = Math.max(0, frameMs - lastMs);
     diagnostics.lastFrameMs = frameMs; diagnostics.lastUpdateMs = frameMs; lastMs = frameMs;
-    const enabled = !!(audio.enabled && audio.ctx?.state === 'running');
+    // Every frame adds a device clock reading; the picture follows the sound once the line is known.
+    const clock = audio.ctx ? audio.outputClock.sample() : null;
+    const enabled = !!(audio.enabled && audio.ctx?.state === 'running' && clock?.valid);
     outputNow = enabled ? audibleTime(frameMs) : 0;
+    if (enabled && sound && Math.abs(clock.offset - outputOffset) > CLOCK_STEP) {
+      // The line moved: keep the picture continuous and close the gap over one bar, as a Sound switch does.
+      const blend = Math.min(1, Math.max(0, (frameMs - correctionStart) / (BAR * 1000)));
+      correction = correction * (1 - blend) - (clock.offset - outputOffset); correctionStart = frameMs;
+      diagnostics.clockSteps++; diagnostics.phaseCorrectionSeconds = correction; diagnostics.correctionStartMs = frameMs;
+    }
+    if (enabled) outputOffset = clock.offset;
     if (enabled !== sound) {
       const current = sound ? elapsed + diagnostics.frameGapMs / 1000 : clockSeconds(frameMs, outputNow);
       if (enabled) {
@@ -156,6 +169,13 @@ function createBeat(audio) {
         correction = modulo(current - target + BAR / 2, BAR) - BAR / 2;
         correctionStart = frameMs; transition.active = false; transition.stage = 'groove';
         audioStart = -Infinity; audioDrop = -Infinity; audioTo = ''; room = audio.room;
+        // Notes handed over while the device clock settled were heard before the picture followed the
+        // sound (the silent clock lit that time); only those heard since the last frame still release.
+        const ring = audio.hitRing, heard = outputNow - diagnostics.frameGapMs / 1000;
+        for (let i = ring.read; i < ring.written; i++) {
+          const slot = ring.slots[i % ring.capacity];
+          if (slot.sequence === i && !slot.released && slot.time < heard) slot.released = true;
+        }
       } else {
         anchorSeconds = current; anchorMs = frameMs;
         if (transition.active && transition.source === 'audio') {

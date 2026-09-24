@@ -78,6 +78,58 @@ LUMINANCE_TRACE = """() => {
 }"""
 
 
+# The audible-time reference for the sync checks. It reads getOutputTimestamp() itself, every 2 ms and
+# whenever a check asks, keeps only unclamped pairs and takes the median of contextTime -
+# performanceTime / 1000 over the last second, starting again whenever the context is not running (a
+# suspended context stops its clock and moves the line). One fresh pair is not a valid reference with
+# the 0.1 s output buffer: Chrome renders the page in 0.1 s bursts and clamps the pair's context time to
+# currentTime for most of each burst period, so the latest pair then sits up to hundreds of milliseconds
+# below the line the device plays on. A pair whose context time trails the currentTime read just before
+# it by four render quanta or more was not clamped; those pairs agree with each other to about 0.3 ms
+# at both buffer sizes (measured), and with the 10 ms buffer every pair is one of them. The median, not
+# the page's own upper envelope, keeps this reference independent of the page's estimator and robust
+# to a stray pair either side. Pairs read in the first 150 ms plus one and a half buffers after the
+# context starts running (the first bursts after a resume can read high) and stale pairs (performance
+# time more than 0.5 s old, left from before a suspension) are not used. The check thresholds and
+# sampling density are unchanged.
+OUTPUT_LINE = """() => {
+  if (window.__qaLine) return true;
+  // A context already running when the reference is installed has long settled.
+  const L = window.__qaLine = {at: new Float64Array(4096), off: new Float64Array(4096), head: 0, count: 0,
+    running: window.__vc.audio.ctx?.state === 'running', since: -Infinity, samples: 0, restarts: 0,
+    lastContext: -1, lastPerformance: -1, sorted: new Float64Array(4096)};
+  L.sample = () => {
+    const ctx = window.__vc.audio.ctx, now = performance.now();
+    if (!ctx || ctx.state !== 'running') { L.running = false; return; }
+    if (!L.running) { L.running = true; L.since = now; L.head = 0; L.count = 0; L.restarts++; }
+    const rendered = ctx.currentTime, s = ctx.getOutputTimestamp?.();
+    if (!(s?.performanceTime > 0) || !Number.isFinite(s.contextTime)) return;
+    if (s.contextTime === L.lastContext && s.performanceTime === L.lastPerformance) return;
+    L.lastContext = s.contextTime; L.lastPerformance = s.performanceTime;
+    if (now - L.since < 150 + 1500 * (Number(ctx.baseLatency) || 0) || s.performanceTime < now - 500) return;
+    if (rendered - s.contextTime < 4 * 128 / ctx.sampleRate) return;
+    while (L.count && L.at[L.head] < now - 1000) { L.head = (L.head + 1) % 4096; L.count--; }
+    if (L.count === 4096) { L.head = (L.head + 1) % 4096; L.count--; }
+    const i = (L.head + L.count) % 4096;
+    L.at[i] = now; L.off[i] = s.contextTime - s.performanceTime / 1000; L.count++; L.samples++;
+  };
+  // The context time heard at atMs, and how far one fresh pair would have put it (diagnostic only).
+  L.audible = atMs => {
+    L.sample();
+    const ctx = window.__vc.audio.ctx, s = ctx?.getOutputTimestamp?.();
+    if (!L.count) return {at: (ctx?.currentTime ?? 0) - (Number(ctx?.outputLatency) || Number(ctx?.baseLatency) || 0), rawErrorMs: 0};
+    for (let k = 0, j = L.head; k < L.count; k++, j = (j + 1) % 4096) L.sorted[k] = L.off[j];
+    const values = L.sorted.subarray(0, L.count).sort(), half = L.count >> 1;
+    const line = L.count % 2 ? values[half] : (values[half - 1] + values[half]) / 2;
+    const at = atMs / 1000 + line;
+    const raw = s?.performanceTime > 0 ? s.contextTime + (atMs - s.performanceTime) / 1000 : at;
+    return {at, rawErrorMs: (raw - at) * 1000};
+  };
+  L.timer = setInterval(L.sample, 2);
+  return true;
+}"""
+
+
 def wait_probe(engine, expression, timeout):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -303,28 +355,24 @@ def measure_flash(engine, mode, setting, path, baseline=False):
 def measure_foundations(engine, path):
     """Observe the live clock; no test clock or injected scheduled hit is used."""
     print("Measuring V0 clock, kick release and Sound switching", flush=True)
+    engine.evaluate(OUTPUT_LINE)
+    wait_probe(engine, "() => window.__vc.audio.ctx?.state !== 'running' || window.__qaLine.count > 0", 10)
     engine.evaluate("""() => {
       const v=window.__vc,b=v.beat;
       const q=window.__qaBeat={kicks:[],switches:[],frames:[],offs:[],active:true};
       q.offs.push(b.on('hit',h=>{
         if(h.source==='audio'&&h.layer==='kick'){
-          const d=b.diagnostics,ctx=v.audio.ctx,stamp=ctx.getOutputTimestamp?.();
-          const audibleNow=stamp?.performanceTime>0?
-            stamp.contextTime+(d.lastFrameMs-stamp.performanceTime)/1000:
-            ctx.currentTime-(Number(ctx.outputLatency)||Number(ctx.baseLatency)||0);
+          const d=b.diagnostics,line=window.__qaLine.audible(d.lastFrameMs),audibleNow=line.at;
           q.kicks.push({time:h.time,audibleAt:h.audibleAt,
             measuredAudibleAt:d.lastFrameMs+(h.time-audibleNow)*1000,
             releasedAt:d.lastFrameMs,lateMs:h.lateMs,
-            frame:h.frame,frameGapMs:d.frameGapMs});
+            frame:h.frame,frameGapMs:d.frameGapMs,rawStampErrorMs:line.rawErrorMs});
         }
       }));
       let previous=null;
       function tick(){
         if(!q.active)return;
-        const s=b.now(),d=b.diagnostics,ctx=v.audio.ctx,stamp=ctx?.getOutputTimestamp?.();
-        const audibleNow=stamp?.performanceTime>0?
-          stamp.contextTime+(d.lastFrameMs-stamp.performanceTime)/1000:
-          (ctx?.currentTime??0)-(Number(ctx?.outputLatency)||Number(ctx?.baseLatency)||0);
+        const s=b.now(),d=b.diagnostics,audibleNow=window.__qaLine.audible(d.lastFrameMs).at;
         const row={seconds:s.seconds,
           frameMs:d.lastFrameMs,source:d.source,phase:s.phase,bar:s.bar,
           audioSeconds:audibleNow-v.audio.origin};
@@ -354,6 +402,7 @@ def measure_foundations(engine, path):
     value = engine.evaluate("""() => {
       const q=window.__qaBeat,b=window.__vc.beat,a=window.__vc.audio;
       q.active=false;for(const off of q.offs)off();
+      clearInterval(window.__qaLine.timer);delete window.__qaLine;
       return {kicks:q.kicks,switches:q.switches,frames:q.frames,diagnostics:b.diagnostics,
         barSeconds:b.barSeconds,ringCapacity:a.hitRing.capacity,
         ringSlots:a.hitRing.slots.length,ringDropped:a.hitRing.dropped,
@@ -476,6 +525,9 @@ def measure_transition(engine, path, sound):
           sound:v.beat.sound,audioTransition:v.audio.transition,visualTransition:v.beat.transition};}""")
         raise RuntimeError(str(error) + "; observed state " + json.dumps(state)) from error
     engine.wait(.5)
+    engine.evaluate("() => { if (window.__qaLine) clearInterval(window.__qaLine.timer); delete window.__qaLine; }")
+    engine.evaluate(OUTPUT_LINE)
+    wait_probe(engine, "() => window.__vc.audio.ctx?.state !== 'running' || window.__qaLine.count > 0", 10)
     engine.evaluate("""() => {
       const v=window.__vc,b=v.beat,r=v.rave;
       if(!r)throw new Error('Rave renderer unavailable');
@@ -502,14 +554,11 @@ def measure_transition(engine, path, sound):
       }
       for(const name of ['bridge','riser','cut','drop'])q.offs.push(b.on(name,tr=>{
         schedule();
-        const d=b.diagnostics,ctx=v.audio.ctx,stamp=ctx?.getOutputTimestamp?.();
-        const at=stamp?.performanceTime>0?
-          stamp.contextTime+(d.lastFrameMs-stamp.performanceTime)/1000:
-          (ctx?.currentTime??0)-(Number(ctx?.outputLatency)||Number(ctx?.baseLatency)||0);
+        const d=b.diagnostics,line=window.__qaLine.audible(d.lastFrameMs),at=line.at;
         const expected=q.schedule[name];
         q.events.push({name,frame:d.frame,frameMs:d.lastFrameMs,frameGapMs:d.frameGapMs,
           expected,actual:q.source==='audio'?at:b.now().seconds,
-          source:tr.source,serial:tr.serial});
+          source:tr.source,serial:tr.serial,rawStampErrorMs:line.rawErrorMs});
       }));
       b.setRoom(target);
       schedule();
@@ -539,6 +588,7 @@ def measure_transition(engine, path, sound):
       requestAnimationFrame(tick);
     }""")
     wait_probe(engine, "() => window.__qaTransition.done", 40)
+    engine.evaluate("() => { clearInterval(window.__qaLine.timer); delete window.__qaLine; }")
     value = engine.evaluate("""() => {const q=window.__qaTransition;return {
       events:q.events,frames:q.frames,source:q.source,schedule:q.schedule,
       nodeCount:q.nodeCount,noteInstances:q.noteInstances,frameComparisons:q.checks,
