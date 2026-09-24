@@ -10,6 +10,16 @@ const cityAudio = (() => {
   const DIRT_SAMPLES = 'https://raw.githubusercontent.com/tidalcycles/dirt-samples/master/strudel.json';
   const BPM = 140, SIXTEENTH = 60 / BPM / 4, BAR = SIXTEENTH * 16, CPS = BPM / 60 / 4;
   const EPS = 0.0001, SMOOTH = 0.25, LOOKAHEAD = 0.12;
+  // Notes are handed to Strudel COMMIT seconds ahead. Every voice handed over lives on the audio thread
+  // from that moment (Strudel builds its nodes, worklets and end timer at once), so a longer lead costs
+  // the audio thread all the time: 0.25 s rendered 5 % slower than 0.12 s in a quiet window and cut out
+  // far more under machine load. The lead therefore stays at the engine's 0.12 s. Instead the page keeps
+  // its main thread short, a caller about to run a known long task braces (hands the next notes over
+  // once, further ahead), and a note that still misses its time by less than LATE plays a few
+  // milliseconds late instead of leaving a hole. Bar decisions (a room change, a retarget, a cancel)
+  // happen LOOKAHEAD ahead, on the bar the engine has always picked; events already handed over for
+  // that bar (after a brace) are brought in line with the transition grammar when it is decided.
+  const COMMIT = LOOKAHEAD, LATE = 0.05, OUTPUT_LATENCY = 0.1;
   const thresholds = {kick: 0, hatC: .15, perc: .30, hatO: .45, stab: .60, clap: .75, pad: .90};
   const layerThresholds = {...thresholds, bass: .60, shaker: .15, woodblock: .30, clank: .30, blip: .30,
     arp: .30, bubble: .30, rim: .30, noise: .15, ride: .45, riser: .30, vox: .45};
@@ -55,7 +65,9 @@ const cityAudio = (() => {
   let riser = null;
   const graveyard = [];
   let enabled = false, desired = 'skyline', active = null, S = null, controller = null, loading = null;
-  let outgoing = null, transition = null, timer = null, origin = 0, nextStep = 0, nextOrbit = 1;
+  let outgoing = null, transition = null, timer = null, origin = 0, nextStep = 0, decideStep = 0, nextOrbit = 1;
+  let ticker = null, lastTick = 0, soundsReady = false, braceTo = 0;
+  const compileTried = new Set();
   let preferred = 'off', state = 'off', rideHeading = null, pending = null, serial = 0, startToken = 0;
   const buses = [], listeners = new Set(), timeline = {}, waveCurves = new Map();
   const compiled = new Map(), orbitTargets = new Map(), preloaded = new Map();
@@ -72,18 +84,31 @@ const cityAudio = (() => {
   const hitRing = {capacity: 512, written: 0, read: 0, dropped: 0,
     slots: Array.from({length: 512}, () => ({room: '', layer: '', time: 0, gain: 0,
       sequence: -1, released: true, source: 'audio', effect: '', audibleAt: 0,
-      releasedAt: 0, frame: 0, lateMs: 0}))};
+      releasedAt: 0, frame: 0, lateMs: 0, busSerial: -1, rawGain: 0}))};
+  function hitGain(bus, layer, time, raw) {
+    return bus.density < (layerThresholds[layer] ?? .30) ||
+      (bus.lowMuted && bus.low.has(layer) && time < (bus.dropAt ?? Infinity)) ? 0 : raw;
+  }
   function recordHit(bus, layer, time, value) {
     const sequence = hitRing.written++, slot = hitRing.slots[sequence % hitRing.capacity];
     if (!slot.released && sequence - hitRing.read >= hitRing.capacity) hitRing.dropped++;
     if (sequence - hitRing.read >= hitRing.capacity) hitRing.read = sequence - hitRing.capacity + 1;
     slot.room = bus.id; slot.layer = layer; slot.time = time; slot.sequence = sequence; slot.released = false;
-    slot.gain = Number.isFinite(value.gain) ? value.gain : 1;
-    if (bus.density < (layerThresholds[layer] ?? .30) ||
-        (bus.lowMuted && bus.low.has(layer) && time < (bus.dropAt ?? Infinity))) slot.gain = 0;
+    slot.busSerial = bus.serial; slot.rawGain = Number.isFinite(value.gain) ? value.gain : 1;
+    slot.gain = hitGain(bus, layer, time, slot.rawGain);
+  }
+  // A decision on a bar changes how a bus treats its low layers from that bar on; the hits already
+  // handed over for that bar and later take the new treatment, as they would have if handed over now.
+  function refreshHits(bus, from) {
+    for (let i = hitRing.read; i < hitRing.written; i++) {
+      const slot = hitRing.slots[i % hitRing.capacity];
+      if (slot.sequence !== i || slot.released || slot.busSerial !== bus.serial || slot.time < from) continue;
+      slot.gain = hitGain(bus, slot.layer, slot.time, slot.rawGain);
+    }
   }
   const diagnostics = {switches: [], scheduledSteps: 0, scheduledVoices: 0, droppedSteps: 0, voiceErrors: 0,
-    compileErrors: {}, bpm: BPM, timerMs: 25, lookaheadSeconds: LOOKAHEAD, sixteenthSeconds: SIXTEENTH,
+    compileErrors: {}, bpm: BPM, timerMs: 25, lookaheadSeconds: LOOKAHEAD, commitSeconds: COMMIT, lateSeconds: LATE, latencyHint: OUTPUT_LATENCY,
+    lateShifted: 0, lateDropped: 0, workerTicks: 0, braces: 0, sixteenthSeconds: SIXTEENTH,
     engine: 'strudel', strudel: STRUDEL_URL};
   try { preferred = localStorage.getItem('vc-sound') === 'on' ? 'on' : 'off'; } catch (_) {}
   if (preferred === 'on') state = 'waiting';
@@ -112,13 +137,12 @@ const cityAudio = (() => {
   function createContext() {
     const AudioConstructor = window.AudioContext || window.webkitAudioContext;
     if (!AudioConstructor) throw new Error('Web Audio is unavailable in this browser.');
-    ctx = new AudioConstructor({latencyHint: 'interactive'});
-    const random = seeded(0x9e3779b9);
+    // A 0.1 s output buffer instead of the 10 ms 'interactive' one: nothing here is played live, every
+    // event is scheduled ahead on the context clock and the picture follows the device clock
+    // (getOutputTimestamp), so the only change is that a busy machine no longer starves the device.
+    // On this laptop under load it cut output underruns about tenfold (the music cutting out).
+    ctx = new AudioConstructor({latencyHint: OUTPUT_LATENCY});
     const impulse = ctx.createBuffer(2, Math.ceil(ctx.sampleRate * 2.4), ctx.sampleRate);
-    for (let channel = 0; channel < 2; channel++) {
-      const values = impulse.getChannelData(channel);
-      for (let i = 0; i < values.length; i++) values[i] = (random() * 2 - 1) * Math.pow(1 - i / values.length, 3.2) * .45;
-    }
     compressor = ctx.createDynamicsCompressor();
     compressor.threshold.value = -12; compressor.knee.value = 12; compressor.ratio.value = 3;
     compressor.attack.value = .006; compressor.release.value = .14;
@@ -127,16 +151,30 @@ const cityAudio = (() => {
     cut = gain(1);
     compressor.connect(clip); clip.connect(cut); cut.connect(master); master.connect(analyser); analyser.connect(ctx.destination);
     noiseBuffer = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate);
-    const noiseData = noiseBuffer.getChannelData(0);
-    for (let i = 0; i < noiseData.length; i++) noiseData[i] = random() * 2 - 1;
     const delay = ctx.createDelay(2), delayTone = filter('lowpass', 5200); feedback = gain(.35);
     delay.delayTime.value = 60 / BPM * .75;
     delaySend = gain(1); delaySend.connect(delay); delay.connect(delayTone);
     delayTone.connect(feedback); feedback.connect(delay); delayTone.connect(compressor);
-    const reverb = ctx.createConvolver(); reverb.buffer = impulse;
+    const reverb = ctx.createConvolver();
     reverbSend = gain(1); reverbGate = gain(1); reverbSend.connect(reverb); reverb.connect(reverbGate); reverbGate.connect(compressor);
-    origin = ctx.currentTime + .04; nextStep = 0; diagnostics.epoch = origin; diagnostics.origin = origin;
+    origin = ctx.currentTime + .04; nextStep = 0; decideStep = 0; diagnostics.epoch = origin; diagnostics.origin = origin;
     active = createBus(desired, 1); feedback.gain.value = active.spec.fx.feedback ?? .35; diagnostics.sampleRate = ctx.sampleRate;
+    fillNoise(impulse, reverb);
+  }
+  // The master reverb's impulse and the riser's noise come from one seeded sequence, in the same order
+  // as ever (impulse left, impulse right, noise). They are written in slices between tasks, so the
+  // Sound gesture is not one long task; the first note waits for Strudel far longer than this takes.
+  function fillNoise(impulse, reverb) {
+    const random = seeded(0x9e3779b9), SLICE = 24000, started = performance.now();
+    const jobs = [impulse.getChannelData(0), impulse.getChannelData(1), noiseBuffer.getChannelData(0)];
+    let job = 0, i = 0;
+    (function slice() {
+      const values = jobs[job], n = values.length, end = Math.min(n, i + SLICE);
+      if (job < 2) for (; i < end; i++) values[i] = (random() * 2 - 1) * Math.pow(1 - i / n, 3.2) * .45;
+      else for (; i < end; i++) values[i] = random() * 2 - 1;
+      if (i >= n) { job++; i = 0; if (job === 2) reverb.buffer = impulse; }
+      if (job < jobs.length) setTimeout(slice, 0); else diagnostics.noiseMs = Math.round(performance.now() - started);
+    })();
   }
   // Strudel loads on the first sound gesture, into the page's one AudioContext.
   function loadStrudel() {
@@ -147,11 +185,15 @@ const cityAudio = (() => {
       controller = S.getSuperdoughAudioController();
       const createOrbit = controller.getOrbit.bind(controller);
       controller.getOrbit = (number, channels) => {
-        const fresh = controller.nodes[number] == null, orbit = createOrbit(number, channels);
-        if (fresh) {
-          orbit.output.disconnect();
-          const target = orbitTargets.get(number); if (target) orbit.output.connect(target);
-        }
+        if (controller.nodes[number] != null) return controller.nodes[number];
+        // An orbit plays into its room bus, never straight to the speakers, so Strudel's own
+        // destination wiring is skipped: its panner and splitter would stay in the rendered graph
+        // after the orbit retires, a pair more at every room change.
+        const connect = controller.output.connectToDestination;
+        controller.output.connectToDestination = () => {};
+        let orbit;
+        try { orbit = createOrbit(number, channels); } finally { controller.output.connectToDestination = connect; }
+        const target = orbitTargets.get(number); if (target) orbit.output.connect(target);
         return orbit;
       };
       S.miniAllStrings();
@@ -162,17 +204,43 @@ const cityAudio = (() => {
         quiet(S.samples(`${SAMPLE_CDN}/tidal-drum-machines.json`, `${SAMPLE_CDN}/tidal-drum-machines/machines/`, {prebake: true})),
         quiet(S.samples(DIRT_SAMPLES))
       ]);
-      for (const id of Object.keys(ROOM_CODE)) compileRoom(id);
+      // No room compiles or plays before every sound is registered (a note handed over earlier is
+      // rejected by Strudel as an unknown sound), which is when the engine has always started.
+      soundsReady = true;
+      // The room that plays first compiles now; the others compile and preload one at a time in
+      // idle moments (a room the visitor asks for sooner compiles on demand), so no long task lands
+      // while the music is already playing.
+      const first = active?.spec.source || active?.id || 'working';
+      ensureCompiled(first);
       diagnostics.loadMs = Math.round(performance.now() - started);
-      await preload(active?.spec.source || active?.id || 'working');
+      await preload(first);
       diagnostics.readyMs = Math.round(performance.now() - started);
-      for (const id of Object.keys(ROOM_CODE)) preload(id);
+      warmRooms();
       notify();
     })().catch(error => {
       diagnostics.error = String(error); loading = null;
       console.warn('Vault City sound could not load Strudel:', error);
     });
     return loading;
+  }
+  function ensureCompiled(id) {
+    if (compiled.has(id)) return compiled.get(id);
+    if (!soundsReady || compileTried.has(id) || !Object.hasOwn(ROOM_CODE, id)) return undefined;
+    compileTried.add(id);
+    const started = performance.now(), layers = compileRoom(id);
+    (diagnostics.compileMs ??= {})[id] = Math.round(performance.now() - started);
+    return layers;
+  }
+  const idle = fn => window.requestIdleCallback ? requestIdleCallback(fn, {timeout: 500}) : setTimeout(fn, 50);
+  function warmRooms() {
+    const queue = Object.keys(ROOM_CODE);
+    idle(function next() {
+      while (queue.length && compiled.has(queue[0]) && preloaded.has(queue[0])) queue.shift();
+      if (!queue.length) return;
+      const id = queue[0];
+      if (!compiled.has(id) && !compileTried.has(id)) { brace(0.35); ensureCompiled(id); } else { queue.shift(); preload(id); }
+      idle(next);
+    });
   }
   function compileRoom(id, code = ROOM_CODE[id]) {
     const layers = new Map(), P = S.Pattern.prototype, previous = P.p;
@@ -195,20 +263,26 @@ const cityAudio = (() => {
     return compiled.get(id);
   }
   // Fetch and decode every sample a room can play before its first bar needs it.
+  // Each layer's cycle is queried in its own task (a whole room at once is a long task, and the first
+  // room's runs just as its music starts), so the transport keeps handing over notes in between.
   function preload(id) {
     if (preloaded.has(id)) return preloaded.get(id);
-    const layers = compiled.get(id), jobs = [], seen = new Set();
-    if (layers) for (const pattern of layers.values()) {
-      let haps = []; try { haps = pattern.queryArc(0, rooms[id]?.cycleBars || 32); } catch (_) {}
-      for (const hap of haps) {
-        const value = hap.value; if (!value || typeof value !== 'object' || !value.s) continue;
-        const name = value.bank ? `${value.bank}_${value.s}` : value.s, sound = S.getSound(name);
-        const key = name + ':' + (value.n ?? 0) + ':' + (value.note ?? '');
-        if (seen.has(key) || sound?.data?.type !== 'sample') continue;
-        seen.add(key); jobs.push(S.getSampleBuffer({...value, s: name}, sound.data.samples).catch(() => null));
+    if (!soundsReady) return Promise.resolve();
+    const layers = ensureCompiled(id), jobs = [], seen = new Set();
+    const job = (async () => {
+      if (layers) for (const pattern of layers.values()) {
+        let haps = []; try { haps = pattern.queryArc(0, rooms[id]?.cycleBars || 32); } catch (_) {}
+        for (const hap of haps) {
+          const value = hap.value; if (!value || typeof value !== 'object' || !value.s) continue;
+          const name = value.bank ? `${value.bank}_${value.s}` : value.s, sound = S.getSound(name);
+          const key = name + ':' + (value.n ?? 0) + ':' + (value.note ?? '');
+          if (seen.has(key) || sound?.data?.type !== 'sample') continue;
+          seen.add(key); jobs.push(S.getSampleBuffer({...value, s: name}, sound.data.samples).catch(() => null));
+        }
+        await new Promise(resolve => setTimeout(resolve, 0));
       }
-    }
-    const job = Promise.race([Promise.all(jobs), new Promise(resolve => setTimeout(resolve, 6000))]);
+      return Promise.race([Promise.all(jobs), new Promise(resolve => setTimeout(resolve, 6000))]);
+    })();
     preloaded.set(id, job); return job;
   }
   function createBus(id, initialGain, lowMuted = false) {
@@ -225,7 +299,7 @@ const cityAudio = (() => {
       preFade: pan, postFade: fader, gain: fader, sources: new Set(), sidechain: {}, layers: {}, mutes: {}, orbits: {},
       low: new Set(spec.low || LOW_LAYERS), lowMuted,
       density: 1, brightness: 1, cutoff: spec.fx.lpf, reverbAmount: spec.fx.reverb, voices: 0,
-      startStep: null, modulation: []};
+      startStep: null, modulation: [], kickTimes: [], gateTimes: []};
     for (const name of spec.layers) ensureLayer(bus, name);
     if (rideHeading !== null) pan.pan.value = Math.sin(rideHeading) * .24;
     if (spec.fx.lfo) {
@@ -273,23 +347,35 @@ const cityAudio = (() => {
     if (spec.cycleBars === 16) return cycle < 4 ? 'establish' : cycle < 8 ? 'withhold' : cycle < 10 ? 'signal' : 'return';
     return cycle < 16 ? 'establish' : cycle < 20 ? 'withhold' : cycle < 22 ? 'signal' : 'return';
   }
+  function gate(bus, time) {
+    reverbGate.gain.cancelAndHoldAtTime(time);
+    reverbGate.gain.linearRampToValueAtTime(1, time + .004);
+    reverbGate.gain.setValueAtTime(1, time + bus.spec.fx.gated);
+    reverbGate.gain.linearRampToValueAtTime(.08, time + bus.spec.fx.gated + .015);
+  }
+  // Each bus remembers the kick and stab times it has handed over and not yet played, so a bar
+  // decision can bring them in line with the grammar (the duck and the gated reverb).
+  function remember(list, time) {
+    const now = ctx.currentTime;
+    while (list.length && list[0] < now - .2) list.shift();
+    list.push(time);
+  }
   function play(bus, name, value, time, seconds, cycle) {
-    if (!value || typeof value !== 'object' || time < ctx.currentTime) return;
-    if (name === 'kick' && !(bus.lowMuted && time < (bus.dropAt ?? Infinity))) duck(bus, time);
+    if (!value || typeof value !== 'object') return;
+    if (time < ctx.currentTime) {
+      if (time < ctx.currentTime - LATE) { diagnostics.lateDropped++; return; }
+      time = ctx.currentTime + .005; diagnostics.lateShifted++;
+    }
+    if (name === 'kick') { remember(bus.kickTimes, time); if (!(bus.lowMuted && time < (bus.dropAt ?? Infinity))) duck(bus, time); }
     ensureLayer(bus, name);
     S.superdough({...value, orbit: bus.orbits[name]}, time, seconds, CPS, cycle)
       .catch(error => { diagnostics.voiceErrors++; diagnostics.lastVoiceError = String(error); });
     recordHit(bus, name, time, value);
-    if (bus.spec.fx.gated && bus === active && (name === 'kick' || name === 'stab')) {
-      reverbGate.gain.cancelAndHoldAtTime(time);
-      reverbGate.gain.linearRampToValueAtTime(1, time + .004);
-      reverbGate.gain.setValueAtTime(1, time + bus.spec.fx.gated);
-      reverbGate.gain.linearRampToValueAtTime(.08, time + bus.spec.fx.gated + .015);
-    }
+    if (bus.spec.fx.gated && (name === 'kick' || name === 'stab')) { remember(bus.gateTimes, time); if (bus === active) gate(bus, time); }
     diagnostics.scheduledVoices++; bus.voices++;
   }
   function scheduleBus(bus, step, time) {
-    const spec = bus.spec, layers = S && compiled.get(spec.source || spec.id);
+    const spec = bus.spec, layers = ensureCompiled(spec.source || spec.id);
     if (spec.fx.sweep) {
       const progress = (step % (spec.fx.sweepBars * 16)) / (spec.fx.sweepBars * 16 - 1);
       bus.lowpass.frequency.setTargetAtTime(spec.fx.sweep[0] + progress * (spec.fx.sweep[1] - spec.fx.sweep[0]), time, SMOOTH);
@@ -353,13 +439,22 @@ const cityAudio = (() => {
     lowTo(bus, 1, drop, .005);
     return bus;
   }
-  function beginTransition(id, time) {
+  // Steps from `step` up to the commit cursor were handed over before this bar's decision; the bus
+  // that starts on this bar gets them now, in order, as if they had been scheduled with it.
+  function backfill(bus, step) {
+    for (let s = step; s < nextStep; s++) scheduleBus(bus, s, origin + s * SIXTEENTH);
+  }
+  function beginTransition(id, time, step) {
     if (!active || active.id === id) { pending = null; return; }
     const beat = BAR / 4, startBar = Math.round((time - origin) / BAR);
     const dropBar = nextDrop(startBar), drop = origin + dropBar * BAR;
     outgoing = active; active = enterBridge(id, time, drop);
     // The old room loses its kick and bass on the first beat, and a low-pass closes across the bridge.
     outgoing.lowMuted = true; lowTo(outgoing, 0, time + beat, beat);
+    // Its kicks from this bar on no longer duck its pads and bass, and its low hits no longer light.
+    for (const node of Object.values(outgoing.sidechain)) node.gain.cancelScheduledValues(time);
+    for (const kick of outgoing.kickTimes) if (kick < time && kick > time - .1) duck(outgoing, kick);
+    refreshHits(outgoing, time);
     outgoing.djFilter.frequency.setValueAtTime(20000, time);
     outgoing.djFilter.frequency.exponentialRampToValueAtTime(BRIDGE_LPF, drop - beat);
     outgoing.fader.gain.setValueAtTime(1, drop - .005); outgoing.fader.gain.linearRampToValueAtTime(0, drop);
@@ -369,15 +464,17 @@ const cityAudio = (() => {
       curve: 'bridge-slam', bar: startBar, dropBar};
     diagnostics.switches.push({...transition}); if (diagnostics.switches.length > 64) diagnostics.switches.shift();
     pending = null;
+    backfill(active, step);
   }
   // A different room chosen mid-bridge takes over the bridge; the drop stays on its phrase.
-  function retarget(id, time) {
+  function retarget(id, time, step) {
     const beat = BAR / 4, dropped = active;
     dropped.fader.gain.cancelAndHoldAtTime(time); dropped.fader.gain.linearRampToValueAtTime(0, time + beat);
     graveyard.push({bus: dropped, at: time + beat + .3});
     active = enterBridge(id, time, transition.drop);
     transition = {...transition, to: id, retargetedAt: time};
     diagnostics.switches.push({...transition}); pending = null;
+    backfill(active, step);
   }
   // Going back to the old room mid-bridge brings its kick and bass straight back on the bar.
   function cancelTransition(time) {
@@ -394,9 +491,16 @@ const cityAudio = (() => {
     if (riser) { riser.level.gain.cancelAndHoldAtTime(time); riser.level.gain.linearRampToValueAtTime(0, time + .05); riser = null; }
     diagnostics.switches.push({...transition, cancelledAt: time});
     active = back; outgoing = null; transition = null; pending = null;
+    // Hits handed over for this bar and later follow the room that is back: its kicks duck and light
+    // again, and only the active room drives the gated reverb.
+    for (const kick of back.kickTimes) if (kick >= time) duck(back, kick);
+    refreshHits(back, time);
+    if (dropped.spec.fx.gated) reverbGate.gain.cancelAndHoldAtTime(time);
+    if (back.spec.fx.gated) for (const at of back.gateTimes) if (at >= time) gate(back, at);
   }
   function scheduler() {
     if (!enabled || !ctx) return;
+    lastTick = performance.now();
     sampleOutputClock();
     const now = ctx.currentTime;
     for (let i = graveyard.length - 1; i >= 0; i--) if (now >= graveyard[i].at) { retire(graveyard[i].bus); graveyard.splice(i, 1); }
@@ -405,33 +509,75 @@ const cityAudio = (() => {
       if (desired !== active.id) pending = desired;
     }
     // A resumed or backgrounded tab catches up its transport without bursting old notes.
-    while (origin + nextStep * SIXTEENTH < ctx.currentTime - .02) { nextStep++; diagnostics.droppedSteps++; }
-    while (origin + nextStep * SIXTEENTH < ctx.currentTime + LOOKAHEAD) {
-      const time = origin + nextStep * SIXTEENTH;
-      if (nextStep % 16 === 0) {
-        if (pending && !transition) beginTransition(pending, time);
+    while (origin + decideStep * SIXTEENTH < now - .02) decideStep++;
+    while (origin + nextStep * SIXTEENTH < now - LATE) { nextStep++; diagnostics.droppedSteps++; }
+    // Bar decisions, on today's horizon: a change starts on the bar the engine has always picked.
+    while (origin + decideStep * SIXTEENTH < now + LOOKAHEAD) {
+      const time = origin + decideStep * SIXTEENTH;
+      if (decideStep % 16 === 0) {
+        if (pending && !transition) beginTransition(pending, time, decideStep);
         else if (transition && desired !== transition.to && time >= transition.start + 2 * BAR && transition.drop - time >= 2 * BAR) {
-          if (desired === transition.from) cancelTransition(time); else if (Object.hasOwn(rooms, desired)) retarget(desired, time);
+          if (desired === transition.from) cancelTransition(time); else if (Object.hasOwn(rooms, desired)) retarget(desired, time, decideStep);
         }
       }
+      decideStep++;
+    }
+    // Notes, handed over COMMIT ahead (further once, when a caller braces for a long task).
+    const horizon = Math.max(now + COMMIT, braceTo);
+    while (origin + nextStep * SIXTEENTH < horizon) {
+      const time = origin + nextStep * SIXTEENTH;
       scheduleBus(active, nextStep, time);
       if (outgoing && transition && time < transition.end) scheduleBus(outgoing, nextStep, time);
       for (const grave of graveyard) if (time < grave.at) scheduleBus(grave.bus, nextStep, time);
       nextStep++; diagnostics.scheduledSteps++;
     }
   }
+  // The transport runs on a 25 ms interval. A worker ticks alongside it and runs the scheduler only
+  // when the interval has gone quiet for 60 ms (a background tab throttles page timers, not a
+  // worker's messages), so the notes keep flowing whatever the tab is doing.
+  const TICKER = 'let id=0;onmessage=e=>{clearInterval(id);id=e.data>0?setInterval(()=>postMessage(0),e.data):0;};';
+  function startClock() {
+    scheduler(); timer = setInterval(scheduler, 25);
+    try {
+      if (!ticker) {
+        const url = URL.createObjectURL(new Blob([TICKER], {type: 'text/javascript'}));
+        let revoked = false;
+        ticker = new Worker(url);
+        ticker.onmessage = () => {
+          if (!revoked) { revoked = true; URL.revokeObjectURL(url); }
+          if (enabled && performance.now() - lastTick > 60) { diagnostics.workerTicks++; scheduler(); }
+        };
+        ticker.onerror = () => { ticker = null; };
+      }
+      ticker.postMessage(25);
+    } catch (_) { ticker = null; }
+  }
+  // A caller about to run a known long task (the canvas resize on entering or leaving Tier 1) first
+  // hands over the notes of the next `seconds`, once, so the task delays nothing that is heard. Bar
+  // decisions stay on their own horizon; a decision on a bar already handed over is brought in line
+  // as above.
+  function brace(seconds = 0.4) {
+    if (!enabled || !ctx || !soundsReady) return false;
+    braceTo = ctx.currentTime + clamp(seconds, 0, 1); diagnostics.braces++;
+    scheduler(); return true;
+  }
+  function stopClock() { clearInterval(timer); timer = null; if (ticker) ticker.postMessage(0); }
   function setRoom(id) {
-    desired = Object.hasOwn(rooms, id) ? id : 'skyline';
+    const next = Object.hasOwn(rooms, id) ? id : 'skyline', source = rooms[next].source || next;
+    // A room that has not compiled yet compiles here, outside the transport, after the notes of the
+    // next moments have been handed over, so the compile delays nothing that is heard.
+    if (ctx && soundsReady && !compiled.has(source) && !compileTried.has(source)) { brace(0.35); ensureCompiled(source); }
+    desired = next;
     if (!ctx) return desired;
     pending = desired === active?.id ? null : desired;
-    if (S) preload(rooms[desired].source || desired);
+    preload(source);
     return desired;
   }
   async function toggle(event) {
     if (!event?.isTrusted || !['click', 'keydown', 'pointerup'].includes(event.type)) return enabled;
     if (state === 'starting') return enabled;
     if (enabled) {
-      enabled = false; preferred = 'off'; state = 'off'; clearInterval(timer); timer = null; startToken++;
+      enabled = false; preferred = 'off'; state = 'off'; stopClock(); startToken++;
       master.gain.cancelScheduledValues(ctx.currentTime); follow(master.gain, 0);
       setTimeout(() => { if (!enabled && ctx.state === 'running') ctx.suspend(); }, 300);
     } else {
@@ -441,7 +587,7 @@ const cityAudio = (() => {
         if (!ctx) createContext();
         await ctx.resume(); enabled = true; preferred = 'on'; state = 'on';
         master.gain.cancelScheduledValues(ctx.currentTime); follow(master.gain, .8);
-        scheduler(); timer = setInterval(scheduler, 25);
+        startClock();
         loadStrudel().then(() => { if (token === startToken) notify(); });
       } catch (error) { enabled = false; state = 'error'; diagnostics.error = String(error); }
     }
@@ -464,8 +610,12 @@ const cityAudio = (() => {
   }
   function setTimeline(stats) {
     Object.assign(timeline, stats);
+    // While the timeline plays this runs every frame; a bus whose district did not change keeps its
+    // automation as it is instead of stacking identical ramps on the audio thread.
     if (ctx) for (const bus of buses) {
-      const value = timeline[bus.spec.source || bus.id]; if (value) applyTimeline(bus, value);
+      const value = timeline[bus.spec.source || bus.id]; if (!value) continue;
+      if (bus.timeline && clamp(Number(value.density) || 0, 0, 1) === bus.density && clamp(Number(value.brightness) || 0, 0, 1) === bus.brightness) continue;
+      applyTimeline(bus, value);
     }
   }
   // Console hooks for trying sounds live: cityAudio.code('working') gives strudel.cc-ready code,
@@ -488,8 +638,8 @@ const cityAudio = (() => {
     arrangementPhase(id, bar) { return phase(rooms[id] || rooms.skyline, bar); },
     get transition() { return transition; }, get buses() { return buses; }, get strudel() { return S; },
     get cut() { return cut; }, phrase: PHRASE, minBridge: MIN_BRIDGE,
-    get ready() { return compiled.size > 0; },
-    rooms, diagnostics, timeline, layerThresholds, setRoom, toggle, setTimeline, setRideHeading, code, setCode,
+    get ready() { return soundsReady && compiled.size > 0; },
+    rooms, diagnostics, timeline, layerThresholds, setRoom, toggle, setTimeline, setRideHeading, code, setCode, brace,
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); }
   };
   return api;

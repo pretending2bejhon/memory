@@ -5,15 +5,26 @@ const routes = DATA.design.routes.map(r => {
   const points = r.points.map(p => W(p[0], p[1], r.z));
   const lengths = [0];
   for (let i = 1; i <= points.length; i++) lengths.push(lengths[i-1]+points[i-1].distanceTo(points[i%points.length]));
-  return {...r, points, lengths, length:lengths.at(-1), width:r.district === 'episodic' ? .54 : .88};
+  // Unit side normal per segment, computed once, so sampling an offset lane allocates nothing.
+  const sideX = new Float64Array(points.length), sideZ = new Float64Array(points.length);
+  for (let i = 0; i < points.length; i++) { const a=points[i], b=points[(i+1)%points.length], dx=b.x-a.x, dz=b.z-a.z, l=Math.hypot(dx,dz); sideX[i]=dz/l; sideZ[i]=dx/l; }
+  return {...r, points, lengths, sideX, sideZ, length:lengths.at(-1), width:r.district === 'episodic' ? .54 : .88};
 });
 function sampleRoute(route, distance, out = new THREE.Vector3(), offset = 0) {
+  ROUTE_ARGS[0] = distance; ROUTE_ARGS[1] = offset;
+  return sampleRouteArgs(route, out);
+}
+// The same sampling with the distance and the lane offset read from ROUTE_ARGS: a per-frame caller
+// passes no double, so nothing is boxed when the optimizer does not inline the call.
+const ROUTE_ARGS = new Float64Array(2);
+function sampleRouteArgs(route, out) {
+  const distance = ROUTE_ARGS[0], offset = ROUTE_ARGS[1];
   const s = ((distance % route.length)+route.length)%route.length;
   let lo=0, hi=route.points.length;
   while(lo+1<hi) { const mid=(lo+hi)>>1; if(route.lengths[mid]<=s) lo=mid; else hi=mid; }
   const a=route.points[lo], b=route.points[(lo+1)%route.points.length];
   out.lerpVectors(a,b,(s-route.lengths[lo])/(route.lengths[lo+1]-route.lengths[lo]));
-  if(offset) { const dx=b.x-a.x,dz=b.z-a.z,l=Math.hypot(dx,dz); out.x+=dz/l*offset; out.z-=dx/l*offset; }
+  if(offset) { out.x+=route.sideX[lo]*offset; out.z-=route.sideZ[lo]*offset; }
   return out;
 }
 const streetGroup = new THREE.Group(); scene.add(streetGroup);
@@ -119,12 +130,14 @@ function sidewalkMat(width){
       }`}));
   return sidewalkMats.get(width);
 }
-const markingMat = new THREE.MeshBasicMaterial({color:col(hex('#b5b7a1')),side:THREE.DoubleSide,transparent:true,opacity:.38});
+// Flat, single-layer quads: one draw is enough (a transparent DoubleSide material otherwise draws twice
+// and makes three.js re-resolve its program on every draw of every frame).
+const markingMat = new THREE.MeshBasicMaterial({color:col(hex('#b5b7a1')),side:THREE.DoubleSide,forceSinglePass:true,transparent:true,opacity:.38});
 const dashMatrices=[],arrowMatrices=[];
 for(const [ri,route] of routes.entries()) {
   ribbon(route,route.width+.26,0,-.012,sidewalkMat(route.width+.26));
   ribbon(route,route.width,0,.005,wetStreet(styleOf(route.district).light,route,routeGlow[ri]));
-  for(const side of [-1,1]) ribbon(route,.018,side*(route.width/2+.025),.015,new THREE.MeshBasicMaterial({color:col(styleOf(route.district).light),transparent:true,opacity:.42,side:THREE.DoubleSide}));
+  for(const side of [-1,1]) ribbon(route,.018,side*(route.width/2+.025),.015,new THREE.MeshBasicMaterial({color:col(styleOf(route.district).light),transparent:true,opacity:.42,side:THREE.DoubleSide,forceSinglePass:true}));
   for(let d=0;d<route.length;d+=1.8) {
     const p=sampleRoute(route,d),q=sampleRoute(route,d+.35);
     dummy.rotation.set(-Math.PI/2,0,Math.atan2(q.x-p.x,q.z-p.z));dummy.position.copy(p);dummy.position.y+=.022;dummy.scale.set(1,1,1);dummy.updateMatrix();dashMatrices.push(dummy.matrix.clone());
@@ -180,7 +193,7 @@ for(const [ri,route] of routes.entries()) for(let d=1.5;d<route.length;d+=route.
   lifeLamps.push({p,route,d});
 
 }
-const pavementPools=new THREE.InstancedMesh(new THREE.PlaneGeometry(1.5,2.0),new THREE.MeshBasicMaterial({map:glowTexture,color:0xffffff,transparent:true,opacity:.48,blending:THREE.AdditiveBlending,depthWrite:false,side:THREE.DoubleSide}),lifeLamps.length);
+const pavementPools=new THREE.InstancedMesh(new THREE.PlaneGeometry(1.5,2.0),new THREE.MeshBasicMaterial({map:glowTexture,color:0xffffff,transparent:true,opacity:.48,blending:THREE.AdditiveBlending,depthWrite:false,side:THREE.DoubleSide,forceSinglePass:true}),lifeLamps.length);
 lifeLamps.forEach((s,k)=>{dummy.position.copy(s.p);dummy.position.y+=.025;dummy.rotation.set(-Math.PI/2,0,0);dummy.scale.set(1,1,1);dummy.updateMatrix();pavementPools.setMatrixAt(k,dummy.matrix);pavementPools.setColorAt(k,col(styleOf(s.route.district).light));});streetGroup.add(pavementPools);
 const boulevardLamps=instanced('lamp',lifeLamps.length);
 lifeLamps.forEach((s,k)=>staticSet(boulevardLamps,k,s.p,[.85,1.05,.85],0,MATTE,styleOf(s.route.district).light,k*.13));

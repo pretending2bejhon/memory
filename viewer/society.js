@@ -508,7 +508,7 @@ const vehicleRnd=mulberry(4242),carState=[];
       // A pulled-in taxi's outer side stops at the kerb: the Archive carriageway is 0.54 wide (0.10 lane plus
       // 0.095 plus a 0.075 half width reaches 0.27), a ring 0.88 (0.12 plus 0.22 plus 0.075 leaves 0.025).
       carState.push({type,route:ri,district:route.district,distance:(k+vehicleRnd()*.6)/list.length*route.length,dir:k%2?1:-1,speed,cruise:speed,target:speed,
-        lane:(archive?.1:.12)+(two?.04:0),pullBy:archive?.095:.22,half:VEHICLE_HALF[type],dodge:0,pull:0,mode:0,timer:type==='taxi'?1+vehicleRnd()*5:4+vehicleRnd()*12,goal:0,brake:0,on:true,
+        lane:(archive?.1:.12)+(two?.04:0),pullBy:archive?.095:.22,half:VEHICLE_HALF[type],dodge:0,pull:0,mode:0,timer:type==='taxi'?1+vehicleRnd()*5:4+vehicleRnd()*12,goal:0,brake:0,on:true,drawn:false,
         pos:new THREE.Vector3(),heading:new THREE.Vector3(),yaw:0,rank:0});
     });});
   // Stratified ranks: any prefix holds each type in proportion, so a tier keeps 60 % of each type.
@@ -561,15 +561,20 @@ const STOP_LOOK=.9,STOP_DECEL=.9,CAR_ACCEL=.7,CAR_BRAKE=1.4;
 // swings toward the centre line to pass (C5.3). Stopped taxis are listed per road without allocating.
 const BLOCK_MAX=32,blockS=routes.map(()=>new Float32Array(BLOCK_MAX)),blockDir=routes.map(()=>new Int8Array(BLOCK_MAX)),blockCar=routes.map(()=>new Int16Array(BLOCK_MAX)),blockCount=new Int16Array(routes.length);
 const vehicleList=Object.values(vehicleMeshes);
+// Traffic budget: every car keeps driving, but one outside the frustum rewrites its matrix only every
+// eighth frame (staggered); a car that was just switched on is always written at once.
+let carFrame=0;
+const trafficState={written:0,culled:0};cars.budget=trafficState;
 function updateCars(dt){
-  const bar=beat.barSeconds;
+  const bar=beat.barSeconds,frameIndex=carFrame++;
+  let written=0,culled=0;
   blockCount.fill(0);
   for(let k=0;k<carState.length;k++){const c=carState[k];if(c.type!=='taxi'||!c.on||c.pull<.35)continue;const r=c.route;
     if(routes[r].district!=='episodic'||blockCount[r]>=BLOCK_MAX)continue;const n=blockCount[r]++,L=routes[r].length;
     blockS[r][n]=((c.distance%L)+L)%L;blockDir[r][n]=c.dir;blockCar[r][n]=k;}
   for(let k=0;k<carState.length;k++){
     const c=carState[k],route=routes[c.route],arr=c.mesh.instanceMatrix.array,o=c.slot*16;
-    if(c.rank>=visibleVehicles){if(c.on){for(let j=0;j<16;j++)arr[o+j]=0;c.on=false;c.mode=0;c.pull=0;c.speed=c.cruise;}continue;}
+    if(c.rank>=visibleVehicles){if(c.on){for(let j=0;j<16;j++)arr[o+j]=0;c.on=false;c.mode=0;c.pull=0;c.speed=c.cruise;}c.drawn=false;continue;}
     c.on=true;c.timer-=dt;
     let target=c.cruise;
     if(c.mode===0){
@@ -595,14 +600,21 @@ function updateCars(dt){
         const ahead=(((blockS[c.route][i]-s)*c.dir)%L+L)%L;if(ahead<.95||ahead>L-.5){pass=1;break;}}}
     c.dodge+=Math.sign(pass-c.dodge)*Math.min(Math.abs(pass-c.dodge),dt*2.2);
     const lateral=c.lane+c.pull*c.pullBy-c.dodge*(c.lane-Math.min(c.lane,.11-c.half)),lane=-lateral*c.dir;
-    sampleRoute(route,c.distance,carPoint,lane);sampleRoute(route,c.distance+.2*c.dir,carAhead,lane);
+    if(c.drawn&&((k+frameIndex)&7)){
+      const px=c.pos.x,py=c.pos.y+.1,pz=c.pos.z;let outside=false;
+      for(let q=0;q<24;q+=4)if(viewPlanes[q]*px+viewPlanes[q+1]*py+viewPlanes[q+2]*pz+viewPlanes[q+3]<-.6){outside=true;break;}
+      if(outside){culled++;continue;}
+    }
+    ROUTE_ARGS[0]=c.distance;ROUTE_ARGS[1]=lane;sampleRouteArgs(route,carPoint);
+    ROUTE_ARGS[0]=c.distance+.2*c.dir;ROUTE_ARGS[1]=lane;sampleRouteArgs(route,carAhead);
     c.pos.copy(carPoint);c.heading.subVectors(carAhead,carPoint).normalize();c.yaw=Math.atan2(c.heading.x,c.heading.z);
     const cy=Math.cos(c.yaw),sy=Math.sin(c.yaw);
     arr[o]=cy;arr[o+1]=0;arr[o+2]=-sy;arr[o+3]=0;arr[o+4]=0;arr[o+5]=1;arr[o+6]=0;arr[o+7]=0;arr[o+8]=sy;arr[o+9]=0;arr[o+10]=cy;arr[o+11]=0;
     arr[o+12]=carPoint.x;arr[o+13]=carPoint.y+.006;arr[o+14]=carPoint.z;arr[o+15]=1;
-    c.mesh.geometry.attributes.aBrake.array[c.slot]=c.brake;
+    c.mesh.geometry.attributes.aBrake.array[c.slot]=c.brake;c.drawn=true;written++;
   }
   for(let i=0;i<vehicleList.length;i++){const mesh=vehicleList[i];mesh.instanceMatrix.needsUpdate=true;mesh.geometry.attributes.aBrake.needsUpdate=true;}
+  trafficState.written=written;trafficState.culled=culled;
 }
 
 // ------------------------------------------------------------------ posters (C4.1 flat decals, C11.4 atlas)
