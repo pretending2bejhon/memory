@@ -8,6 +8,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 sys.path.insert(0, str(ROOT))
 from design import main as build_design
+from page_data import pack_design
 
 
 def main():
@@ -34,14 +35,14 @@ def main():
                        n['retrieval_count'], n['inbound'], n['outbound'], round(p[0], 2), round(p[1], 2)])
     plateaus = {d: {k: round(v, 2) if isinstance(v, float) else v
                     for k, v in info.items() if k != 'streets'} for d, info in lay['districts'].items()}
-    data = {'design': build_design(), 'week0': vc['week0'], 'weeks': vc['weeks'],
+    data = {'design': pack_design(build_design()), 'week0': vc['week0'], 'weeks': vc['weeks'],
             'districts': districts, 'subs': subs, 'types': types, 'statuses': statuses,
             'nodes': packed, 'edges': vc['edges'], 'plateaus': plateaus,
             'bounds': [round(b, 1) for b in lay['bounds']],
             'streets': [[round(r, 2), w] for r, w in lay['districts']['episodic'].get('streets', [])]}
     blob = json.dumps(data, separators=(',', ':'))
     page = (HERE / 'template.html').read_text(encoding='utf-8').replace('__DATA__', blob)
-    for token, name in [('__CITY_LIFE__', 'city-life.js'), ('__RIDE_CAMERA__', 'ride.js'), ('__CITY_AUDIO__', 'city-audio.js'), ('__BEAT__', 'beat.js'), ('__RAVE_LIGHT__', 'rave-light.js'), ('__CROWD__', 'crowd.js'), ('__SOCIETY__', 'society.js'), ('__ROADS__', 'roads.js'), ('__HUD__', 'hud.js'), ('__EXPLORE__', 'explore.js')]:
+    for token, name in [('__CITY_LIFE__', 'city-life.js'), ('__RIDE_CAMERA__', 'ride.js'), ('__CITY_AUDIO__', 'city-audio.js'), ('__BEAT__', 'beat.js'), ('__RAVE_LIGHT__', 'rave-light.js'), ('__CROWD__', 'crowd.js'), ('__SOCIETY__', 'society.js'), ('__NATURE__', 'nature.js'), ('__PAGE_DATA__', 'page-data.js'), ('__ROADS__', 'roads.js'), ('__HUD__', 'hud.js'), ('__EXPLORE__', 'explore.js')]:
         page = page.replace(token, (HERE / name).read_text(encoding='utf-8'))
     # Each room is a plain Strudel file, pasteable into strudel.cc and back.
     rooms = {path.stem: path.read_text(encoding='utf-8') for path in sorted((HERE / 'rooms').glob('*.strudel'))}

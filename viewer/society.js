@@ -902,6 +902,7 @@ function updateCycles(dt){
     c.passing=block;
     const want=block?-.01:track.lane,ease=dt*.8;c.lat+=Math.max(-ease,Math.min(ease,want-c.lat));
     placeOnPath(c,arr,o);
+    nature.mover(k+1,c.pose[POSE_X],c.pose[POSE_Y],c.pose[POSE_Z],true);
     if(reveal)resetTrail(k,c);
     else advanceTrail(k,c);
     writeTrail(k,c,false);

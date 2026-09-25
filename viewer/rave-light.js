@@ -218,26 +218,30 @@ const rave = (() => {
     else if(hit.layer==='clap'&&lights.strobes&&lights.requestFlash(beat.diagnostics.lastFrameMs))clap=Math.max(clap,value);
   });
 
-  const sky=new THREE.Mesh(new THREE.SphereGeometry(1800,32,16),new THREE.ShaderMaterial({
-    side:THREE.BackSide,depthWrite:false,fog:false,uniforms,
-    vertexShader:`varying vec3 vDirection;void main(){vDirection=normalize(position);gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);}`,
-    fragmentShader:`varying vec3 vDirection;uniform float uTime,uEnergy,uSourceIntensity,uKick,uPad,uStab,uFlash,uCut,uDesaturate,uRiser;
+  // One sky function for the dome and for every analytic reflection of it (the Reef lake, C9.2), so a
+  // reflection flashes exactly when the sky does, through the same limiter.
+  const skyGLSL=`uniform float uTime,uEnergy,uSourceIntensity,uKick,uPad,uStab,uFlash,uCut,uDesaturate,uRiser;
       uniform vec3 uColor,uAccent,uNight;
-      float hash(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);}
-      float noise(vec2 p){vec2 i=floor(p),f=fract(p);f=f*f*(3.0-2.0*f);return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),mix(hash(i+vec2(0,1)),hash(i+1.0),f.x),f.y);}
-      void main(){vec3 d=normalize(vDirection);float h=max(0.0,d.y);
+      float skyHash(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);}
+      float skyNoise(vec2 p){vec2 i=floor(p),f=fract(p);f=f*f*(3.0-2.0*f);return mix(mix(skyHash(i),skyHash(i+vec2(1,0)),f.x),mix(skyHash(i+vec2(0,1)),skyHash(i+1.0),f.x),f.y);}
+      vec3 raveSky(vec3 d){float h=max(0.0,d.y);
         vec3 paint=mix(uColor,uNight*3.0,uDesaturate*.88),accent=mix(uAccent,uNight*2.0,uDesaturate*.88);
         float horizon=exp(-h*9.0),ceiling=smoothstep(-.04,.14,d.y);
         vec2 cloudUV=d.xz/(.22+h)*2.8+vec2(uTime*.007,-uTime*.004);
-        float cloud=noise(cloudUV)*.65+noise(cloudUV*2.1)*.35;
+        float cloud=skyNoise(cloudUV)*.65+skyNoise(cloudUV*2.1)*.35;
         float deck=smoothstep(.43,.78,cloud)*exp(-pow(abs((h-.17)*5.0),2.0));
         float az=atan(d.z,d.x),ribbon=sin(az*5.0+sin(az*2.0+uTime*.033)*2.0+uTime*.012);
-        float aurora=exp(-pow(abs((h-.29-ribbon*.10)*17.0),2.0))*(.4+.6*noise(vec2(az*6.0,h*11.0+uTime*.04)));
+        float aurora=exp(-pow(abs((h-.29-ribbon*.10)*17.0),2.0))*(.4+.6*skyNoise(vec2(az*6.0,h*11.0+uTime*.04)));
         vec3 base=mix(uNight,vec3(.005,.009,.021),smoothstep(0.0,.75,h));
         vec3 glow=paint*horizon*(.075+uKick*.07+uRiser*.03)+paint*deck*(.065+uFlash*.12);
         glow+=accent*aurora*(.05+uPad*.06+uStab*.04);
-        vec3 c=(base+glow*uEnergy*uSourceIntensity)*uCut*ceiling+uNight*(1.0-ceiling);
-        gl_FragColor=vec4(c,1.0);
+        return (base+glow*uEnergy*uSourceIntensity)*uCut*ceiling+uNight*(1.0-ceiling);
+      }`;
+  const sky=new THREE.Mesh(new THREE.SphereGeometry(1800,32,16),new THREE.ShaderMaterial({
+    side:THREE.BackSide,depthWrite:false,fog:false,uniforms,
+    vertexShader:`varying vec3 vDirection;void main(){vDirection=normalize(position);gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);}`,
+    fragmentShader:`varying vec3 vDirection;${skyGLSL}
+      void main(){gl_FragColor=vec4(raveSky(normalize(vDirection)),1.0);
         #include <colorspace_fragment>
       }`
   }));sky.renderOrder=-20;sky.frustumCulled=false;scene.add(sky);
@@ -479,7 +483,7 @@ const rave = (() => {
     }
     screens.instanceMatrix.needsUpdate=true;
   }
-  return {update,sky,stars:starField,lasers,searchlights,drones,fireworks,grid,screens,screenFrames,screenHosts,
+  return {update,sky,skyGLSL,stars:starField,lasers,searchlights,drones,fireworks,grid,screens,screenFrames,screenHosts,
     laserOrigins,laserHosts,glyphs,patterns,uniforms,transition,diagnostics,screenLines,atlas,shellOrigins,shellColors,fireUniforms,screenUniforms};
 })();
 const stars=rave.stars;

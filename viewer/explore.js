@@ -136,6 +136,10 @@ const explore = (() => {
       }
     }
     for (let i = 0; i < extras.length; i++) { const h = extras[i](lx, ly); if (h !== null && h !== undefined) take(h, K.extra, i, 0); }
+    // The lake answers for its sand, pier and island; null blocks water and the outer bank.
+    const lakeHeight = nature.surfaceAt(lx, wz);
+    if (lakeHeight === null) { hit.kind = K.water; return false; }
+    if (lakeHeight !== undefined) take(lakeHeight, K.extra, -1, 0);
     if (!pFound) { if (inLake(lx, ly)) hit.kind = K.water; return false; }
     if (insideFootprint(x, wz, hit.h, 0)) { hit.kind = K.building; return false; }
     return true;
@@ -151,6 +155,9 @@ const explore = (() => {
       zone.district = hit.s < split ? b.from : b.to; zone.depth = Math.abs(hit.s - split); return zone;
     }
     if (hit.kind === K.bridge || hit.kind === K.none || hit.kind === K.water) return zone;
+    if (hit.kind === K.extra && nature.surfaceAt(x, wz) !== undefined) {
+      zone.district = 'reef'; zone.depth = 1; return zone;
+    }
     const lx = x, ly = -wz;
     for (let i = 0; i < plates.length; i++) {
       const p = plates[i], d = p.disc ? p.foot - Math.hypot(lx - p.cx, ly - p.cy) : -rectSdf(p, lx, ly, .97);
@@ -1007,6 +1014,7 @@ const explore = (() => {
     // The world notices you (C8.10): crowd.js turns heads and cheers from this; nature.js (V7) reads the same
     // object as explore.notice for dogs that follow the bike for up to 2 s and pigeons that scatter within 1.5.
     const n = crowd.notice; n.active = true; n.x = P.x; n.z = P.z; n.speed = P.onBike ? Math.abs(bike.speed) : P.speed; n.onBike = P.onBike;
+    nature.mover(0, P.x, P.y, P.z, P.onBike);
     const amount = !reduced && tier.current >= 2 && P.onBike ? clamp((Math.abs(bike.speed) - 4) / 3, 0, 1) : 0;
     const dim = debug.forceVeil !== null ? debug.forceVeil : travel.dim;
     fringe.enabled = amount > .001 || dim > .001;

@@ -1162,7 +1162,7 @@ def place_lake(data, layout, routes, streets, bridges):
     for k in [0] + [s * j for j in range(1, 31) for s in (1, -1)]:
         a = base + math.radians(2 * k)
         ux, uy = math.cos(a), math.sin(a)
-        lake = {"cx": reef["cx"] + ux * (touch + LAKE_B), "cy": reef["cy"] + uy * (touch + LAKE_B),
+        lake = {"cx": reef["cx"] + ux * (touch + LAKE_B + 0.03), "cy": reef["cy"] + uy * (touch + LAKE_B + 0.03),
                 "rx": LAKE_A, "ry": LAKE_B, "angle": a + math.pi / 2}
         boundary = ellipse_boundary(lake)
         near = min(math.hypot(bx - reef["cx"], by - reef["cy"]) for bx, by in boundary) - touch
@@ -1588,9 +1588,342 @@ def place_furniture(data, layout, buildings, routes, stages, venues, obst):
     return items
 
 
-def place_trees(data, layout, buildings, routes, bridges, lake, stages, venues, furniture):
-    """C10.2 hook: wax palms, lake trees and balcony plants arrive in V7."""
-    return []
+# ------------------------------------------------------------------ V7: trees and the lake shore (C10.2, C9.4, C9.5)
+SAND = 1.4                    # C9.4 sand strip, outward from the shore
+SAND_WATER, SAND_TOP = 0.27, 0.40   # sand height at the waterline and at the outer edge
+SIDEWALK_TOP = 0.012          # the viewer draws a ring's sidewalk 0.012 below the route z
+RAMP = 1.2                    # the sand rises to the Reef sidewalk over this distance
+TREE = {  # trunk radius, canopy radius, canopy bottom and top as fractions of the height
+    "palm": (0.07, 0.62, 0.86, 1.04),
+    "tropical": (0.09, 0.78, 0.42, 1.0),
+}
+FREE = 0.2                    # C4.1 clearance
+BAR_EAVE = (0.64, 0.55)       # the beach bar's palapa eaves, half extents along the counter and toward the water
+BONFIRE_R = 0.45              # the fire ring with its log seats
+HAMMOCK_HALF = 0.1            # half width of a hammock's cloth
+
+
+def smoothstep(a, b, x):
+    t = max(0.0, min(1.0, (x - a) / (b - a)))
+    return t * t * (3 - 2 * t)
+
+
+def sand_height(lake, reef, x, y):
+    """The shore surface, shared with nature.js (sandHeight): None over water."""
+    gap = ellipse_gap_exact(lake, x, y)
+    if gap < 0:
+        return None
+    h = SAND_WATER + (SAND_TOP - SAND_WATER) * smoothstep(0, SAND, gap)
+    edge = math.hypot(x - reef["cx"], y - reef["cy"]) - reef["outer"]
+    return h + (reef["z"] - h) * (1 - smoothstep(0, RAMP, edge))
+
+
+def shore_point(lake, t, g):
+    """Point at parameter t on the shore, offset g along the outward normal (layout coordinates)."""
+    a, b, c, s = lake["rx"], lake["ry"], math.cos(lake["angle"]), math.sin(lake["angle"])
+    u, v = a * math.cos(t), b * math.sin(t)
+    nu, nv = b * math.cos(t), a * math.sin(t)
+    k = math.hypot(nu, nv)
+    u, v = u + nu / k * g, v + nv / k * g
+    return lake["cx"] + u * c - v * s, lake["cy"] + u * s + v * c
+
+
+class Footprints:
+    """Building boxes with the viewer's 0.57 overhang and their roof height, on a 2-unit grid."""
+
+    def __init__(self, data, layout, buildings):
+        self.cells = {}
+        zs = {d: p["z"] for d, p in layout["districts"].items()}
+        for n in data["nodes"]:
+            f = buildings[str(n["id"])]
+            x, y = layout["pos"][str(n["id"])]
+            box = (x, y, f["w"] * 0.57, f["d"] * 0.57, zs[n["district"]] + f["h"] * 1.08 + 0.14)
+            self.cells.setdefault((math.floor(x / 2), math.floor(y / 2)), []).append(box)
+
+    def near(self, x, y, reach):
+        gx, gy, k = math.floor(x / 2), math.floor(y / 2), math.ceil(reach / 2) + 1
+        for i in range(gx - k, gx + k + 1):
+            for j in range(gy - k, gy + k + 1):
+                yield from self.cells.get((i, j), ())
+
+    def gap(self, x, y, reach=3.0, above=-math.inf):
+        best = math.inf
+        for bx, by, hw, hd, top in self.near(x, y, reach):
+            if top > above:
+                best = min(best, math.hypot(max(0.0, abs(x - bx) - hw), max(0.0, abs(y - by) - hd)))
+        return best
+
+
+class Clearance:
+    """The C4.1 free-standing test, shared by every tree and shore item."""
+
+    def __init__(self, data, layout, buildings, routes, bridges, lake, stages, venues, furniture, streets):
+        self.feet = Footprints(data, layout, buildings)
+        self.obst = Obstacles(bridges, lake, streets)
+        self.roads = SegGrid(reach=2.2)
+        for i, route in enumerate(routes):
+            pts = own_points(route)
+            self.roads.add_polyline(("route", i), pts, route["z"], route_half(route), closed=not route.get("shared"))
+        self.lanes = [min(route_half(r) + 0.04, r.get("clearanceOwn", r["clearance"]) - 0.12) for r in routes]
+        self.stages = stages
+        self.taken = []
+        radius = {"chair": 0.035, "table": 0.06, "bin": 0.04, "kiosk": 0.14, "cart": 0.12, "busstop": 0.16, "crate": 0.05}
+        for f in furniture:
+            if f["kind"] in radius:
+                self.taken.append((f["x"], f["y"], radius[f["kind"]]))
+        for v in venues:
+            if v["terrace"]:
+                nx, ny = v["face"]
+                d = 0.06 + v["terrace"]
+                self.taken.append((v["x"] + nx * d / 2, v["y"] + ny * d / 2, max(v["length"], d) / 2 + 0.05))
+        self.layout = layout
+
+    def free(self, x, y, r, top=None, canopy=None, spacing=0.0):
+        """r: trunk radius. top, canopy: (bottom height, radius) of a canopy at absolute heights."""
+        if self.feet.gap(x, y) < r + FREE:
+            return False
+        if canopy and self.feet.gap(x, y, above=canopy[0]) < canopy[1] + 0.1:
+            return False
+        for (_, i), ax, ay, bx, by, _, _, half in self.roads.near(x, y):
+            d = segment_distance(x, y, ax, ay, bx, by)
+            if d < half + SIDEWALK + r + 0.02 or abs(d - self.lanes[i]) < r + 0.08:
+                return False
+        if self.obst.gap(x, y) < r + FREE:
+            return False
+        for s in self.stages:
+            if math.hypot(x - s["x"], y - s["y"]) < s["r"] + r + 0.3:
+                return False
+        return all(math.hypot(x - tx, y - ty) > r + tr + spacing for tx, ty, tr in self.taken)
+
+    def take(self, x, y, r):
+        self.taken.append((x, y, r))
+
+
+def reef_ring(layout, routes):
+    p = layout["districts"]["reef"]
+    index = next(i for i, r in enumerate(routes) if r["district"] == "reef")
+    return {"cx": p["cx"], "cy": p["cy"], "outer": ring_outer("reef", p), "radius": p["rx"] + 0.4,
+            "z": routes[index]["z"] - SIDEWALK_TOP, "route": index}
+
+
+def rail_opening(lake, reef):
+    """C9.5: the arc of the Reef ring's outer edge that meets the sand, in degrees and route arc length."""
+    inside = []
+    for k in range(720):
+        a = k * math.tau / 720
+        x, y = reef["cx"] + reef["outer"] * math.cos(a), reef["cy"] + reef["outer"] * math.sin(a)
+        inside.append(ellipse_gap_exact(lake, x, y) <= SAND)
+    if all(inside) or not any(inside):
+        raise ValueError("Reef rail opening is degenerate")
+    start = next(k for k in range(720) if inside[k] and not inside[k - 1])
+    end = start
+    while inside[(end + 1) % 720]:
+        end += 1
+    a0, a1 = start * 0.5, (end + 1) * 0.5
+    return {"route": reef["route"], "a0": round(a0, 2), "a1": round(a1, 2),
+            "s0": round(math.radians(a0) * reef["radius"], 3), "s1": round(math.radians(a1) * reef["radius"], 3)}
+
+
+def bar_points(x, y, rot, step=0.1):
+    """Sample points over the beach bar's eave rectangle in layout coordinates. rot is the bar's facing (the layout
+    angle toward the water); local x runs along the counter and local z toward the water, as nature.js draws it."""
+    ex, ez = BAR_EAVE
+    c, s = math.cos(rot), math.sin(rot)
+    nx, nz = math.ceil(2 * ex / step), math.ceil(2 * ez / step)
+    pts = []
+    for i in range(nx + 1):
+        for j in range(nz + 1):
+            lx, lz = -ex + 2 * ex * i / nx, -ez + 2 * ez * j / nz
+            pts.append((x - lx * c + lz * s, y + lx * s + lz * c))
+    return pts
+
+
+def segment_points(ax, ay, bx, by, step=0.1):
+    n = max(1, math.ceil(math.hypot(bx - ax, by - ay) / step))
+    return [(ax + (bx - ax) * k / n, ay + (by - ay) * k / n) for k in range(n + 1)]
+
+
+def shore_param(lake, x, y):
+    u, v = ellipse_local(lake, x, y)
+    return math.atan2(v / lake["ry"], u / lake["rx"])
+
+
+def place_shore(lake, reef, clear):
+    """The beach bar, the bonfire and two hammocks on the sand beside the pier (C9.4). Each is a free-standing
+    structure (C4.1): the bar is tested over its whole eave rectangle, eaves included, since they hang only 0.4
+    above the ring; the fire over its ring of log seats; a hammock along its cloth."""
+    pier = lake["pier"]
+    t_pier = shore_param(lake, pier["x0"], pier["y0"])
+    out = {"sand": SAND, "waterZ": lake["z"], "sandWater": SAND_WATER, "sandTop": SAND_TOP, "ramp": RAMP,
+           "reef": {"x": round(reef["cx"], 4), "y": round(reef["cy"], 4), "outer": round(reef["outer"], 4),
+                    "z": round(reef["z"], 4)}}
+    for side in (1, -1):
+        spots = []
+        for k in range(12, 160):
+            t = t_pier + side * k * 0.012
+            spots.append((t, *shore_point(lake, t, 0.8)))
+        bar = None
+        for t, x, y in spots:
+            # The bar's counter faces the water.
+            wx, wy = shore_point(lake, t, 0.0)
+            rot = round(math.atan2(wx - x, wy - y), 3)
+            far = math.hypot(x - pier["x0"], y - pier["y0"]) > 2.2
+            if far and all(clear.free(px, py, 0.02) for px, py in bar_points(x, y, rot)):
+                bar = (t, x, y, rot)
+                break
+        if not bar:
+            continue
+        t, x, y, rot = bar
+        z = sand_height(lake, reef, x, y)
+        out["bar"] = {"x": round(x, 3), "y": round(y, 3), "z": round(z, 3), "rot": rot}
+        clear.take(x, y, math.hypot(*BAR_EAVE))
+        fire = None
+        for k in range(8, 60):
+            tt = t + side * k * 0.012
+            fx, fy = shore_point(lake, tt, 0.55)
+            if clear.free(fx, fy, BONFIRE_R) and math.hypot(fx - x, fy - y) > 1.4:
+                fire = (fx, fy)
+                break
+        if fire:
+            out["bonfire"] = {"x": round(fire[0], 3), "y": round(fire[1], 3), "z": round(sand_height(lake, reef, *fire), 3)}
+            clear.take(fire[0], fire[1], BONFIRE_R)
+        hammocks = []
+        tt = t + side * 0.2
+        while len(hammocks) < 2 and abs(tt - t) < 1.6:
+            ax, ay = shore_point(lake, tt, 1.0)
+            # Two palms 1.0 apart carry each hammock.
+            step = 1.0 / math.hypot(*(p - q for p, q in zip(shore_point(lake, tt + 0.01, 1.0), (ax, ay)))) * 0.01
+            bx, by = shore_point(lake, tt + side * step, 1.0)
+            if clear.free(ax, ay, 0.07, spacing=0.3) and clear.free(bx, by, 0.07, spacing=0.3) and \
+                    all(clear.free(px, py, HAMMOCK_HALF) for px, py in segment_points(ax, ay, bx, by)[2:-2]):
+                hammocks.append([round(ax, 3), round(ay, 3), round(bx, 3), round(by, 3)])
+                for px, py in ((ax, ay), (bx, by)):
+                    clear.take(px, py, 0.07)
+                clear.take((ax + bx) / 2, (ay + by) / 2, 0.25)
+                tt += side * step * 2.2
+            else:
+                tt += side * 0.02
+        out["hammocks"] = hammocks
+        break
+    if "bar" not in out:
+        raise ValueError("No room for the beach bar on the Reef shore")
+    out["rail"] = rail_opening(lake, reef)
+    return out
+
+
+def place_trees(data, layout, buildings, routes, bridges, lake, stages, venues, furniture, streets=()):
+    """C10.2: wax palms in the Hills and at the spoke landings, tropical trees round the lake, balcony
+    plants in the Hills. Returns the trees; also writes lake[0]["shore"] (C9.4, C9.5)."""
+    clear = Clearance(data, layout, buildings, routes, bridges, lake, stages, venues, furniture, streets)
+    rnd = seeded(20260923)
+    trees = []
+    lk = lake[0]
+    reef = reef_ring(layout, routes)
+    shore = place_shore(lk, reef, clear)
+    lk["shore"] = shore
+
+    def add(kind, at, x, y, z, h, rot=0.0, lean=0.0):
+        r = TREE[kind][0]
+        trees.append({"kind": kind, "at": at, "x": round(x, 3), "y": round(y, 3), "z": round(z, 3), "h": round(h, 2),
+                      "rot": round(rot, 3), **({"lean": round(lean, 3)} if lean else {})})
+        clear.take(x, y, r)
+
+    # Hammock palms first: they carry the hammocks.
+    for ax, ay, bx, by in shore["hammocks"]:
+        for x, y in ((ax, ay), (bx, by)):
+            add("palm", "hammock", x, y, sand_height(lk, reef, x, y), 1.7 + rnd() * 0.3, rnd() * math.tau, 0.05)
+    # Round the lake: tropical broadleaf trees and leaning coconut palms on the sand.
+    lake_trees, t = 0, rnd() * math.tau
+    for k in range(260):
+        t += 0.024 + rnd() * 0.02
+        g = 0.55 + rnd() * 0.5
+        x, y = shore_point(lk, t, g)
+        kind = "tropical" if lake_trees % 2 else "palm"
+        r, cr, cb, _ = TREE[kind]
+        h = (1.5 + rnd() * 0.8) if kind == "tropical" else (2.0 + rnd() * 1.1)
+        z = sand_height(lk, reef, x, y)
+        edge = math.hypot(x - reef["cx"], y - reef["cy"]) - reef["outer"]
+        if z is None or edge < cr + 0.15:
+            continue
+        if clear.obst.gap(x, y, kinds=("pier",)) < cr + 0.2:
+            continue
+        if not clear.free(x, y, r, canopy=(z + h * cb, cr), spacing=0.9):
+            continue
+        wx, wy = shore_point(lk, t, 0.0)
+        add(kind, "lake", x, y, z, h, math.atan2(wx - x, wy - y), 0.16 + rnd() * 0.12 if kind == "palm" else 0.0)
+        lake_trees += 1
+        if lake_trees >= 26:
+            break
+    # Spoke landings: a pair of wax palms on the plateau side of each junction, flanking the view.
+    for b in bridges:
+        if not b.get("spoke"):
+            continue
+        for e in b["ends"]:
+            p = layout["districts"][e["district"]]
+            if p["shape"] == "disc":
+                ix, iy = p["cx"] - e["x"], p["cy"] - e["y"]
+            else:
+                ix, iy = (-1.0, 0.0) if e["x"] > p["cx"] else (1.0, 0.0)
+            k = math.hypot(ix, iy)
+            ix, iy = ix / k, iy / k
+            for side in (1, -1):
+                done = False
+                for inward in (0.95, 1.2, 1.5, 1.9, 2.4):
+                    for lateral in (0.8, 1.05, 1.35, 1.7):
+                        x = e["x"] + ix * inward - iy * side * lateral
+                        y = e["y"] + iy * inward + ix * side * lateral
+                        h = 4.2 + rnd() * 1.2
+                        r, cr, cb, _ = TREE["palm"]
+                        if on_plateau(x, y, p, 0.25) and clear.free(x, y, r, canopy=(p["z"] + h * cb, cr), spacing=0.5):
+                            add("palm", "landing", x, y, p["z"], h, rnd() * math.tau)
+                            done = True
+                            break
+                    if done:
+                        break
+    # The Hills: tall wax palms in the gardens between the houses.
+    p = layout["districts"]["jhon"]
+    spots = []
+    step = 0.62
+    n = int(p["rx"] / step) + 1
+    for i in range(-n, n + 1):
+        for j in range(-n, n + 1):
+            spots.append((p["cx"] + (i + (rnd() - 0.5) * 0.8) * step, p["cy"] + (j + (rnd() - 0.5) * 0.8) * step, rnd()))
+    spots.sort(key=lambda s: s[2])
+    hills = 0
+    for x, y, _ in spots:
+        if hills >= 34:
+            break
+        if not on_plateau(x, y, p, 0.3):
+            continue
+        h = 4.6 + rnd() * 2.4
+        r, cr, cb, _ = TREE["palm"]
+        if clear.free(x, y, r, canopy=(p["z"] + h * cb, cr), spacing=0.95):
+            add("palm", "hills", x, y, p["z"], h, rnd() * math.tau)
+            hills += 1
+    # Balcony plants on the Hills houses (attached to the host face, C4.1 exempts them).
+    ids = sorted((n for n in data["nodes"] if n["district"] == "jhon" and n["created"] is not None),
+                 key=lambda n: n["id"])
+    for node in ids:
+        f = buildings[str(node["id"])]
+        if f["kind"] not in ("gable", "stepped") or rnd() > 0.62:
+            continue
+        x, y = layout["pos"][str(node["id"])]
+        out = (x - p["cx"], y - p["cy"])
+        faces = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+        faces.sort(key=lambda fc: -(fc[0] * out[0] + fc[1] * out[1]))
+        chosen = [faces[0]]
+        view = min(faces, key=lambda fc: fc[0] * 0.375 + fc[1] * 0.927)
+        if view != faces[0] and rnd() < 0.55:
+            chosen.append(view)
+        for fx, fy in chosen:
+            half = (f["w"] if fx else f["d"]) * 0.5
+            length = f["d"] if fx else f["w"]
+            frac = 0.34 + rnd() * 0.08 if f["kind"] == "gable" else 0.45
+            inset = 0.0 if f["kind"] == "gable" else -0.05
+            trees.append({"kind": "balcony", "at": "hills", "host": node["id"], "x": round(x + fx * (half + 0.02 + inset), 3),
+                          "y": round(y + fy * (half + 0.02 + inset), 3), "f": round(frac, 3),
+                          "rot": round(math.atan2(fx, fy), 3), "w": round(length * 0.62, 3)})
+    return trees
 
 
 # ------------------------------------------------------------------ C5.4 road graph and C6.6 tour
@@ -2022,7 +2355,7 @@ def build_design(data, layout, timings=None):
     timings["venues"] = time.perf_counter() - t0
     t0 = time.perf_counter()
     furniture = place_furniture(data, layout, buildings, routes, stages, venues, obst)
-    trees = place_trees(data, layout, buildings, routes, bridges, lake, stages, venues, furniture)
+    trees = place_trees(data, layout, buildings, routes, bridges, lake, stages, venues, furniture, streets)
     timings["furniture"] = time.perf_counter() - t0
     t0 = time.perf_counter()
     graph, polyline = build_graph(routes, streets, forks, bridges)

@@ -209,6 +209,7 @@ import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 
 const DATA = __DATA__;
+__PAGE_DATA__
 
 // ------------------------------------------------------------------ palette (sRGB 0..1)
 const hex = h => [parseInt(h.slice(1, 3), 16) / 255, parseInt(h.slice(3, 5), 16) / 255, parseInt(h.slice(5, 7), 16) / 255];
@@ -430,7 +431,17 @@ controls.maxPolarAngle = Math.PI / 2 - 0.05; controls.minDistance = 4; controls.
 controls.autoRotateSpeed = 0.35;
 
 const W = (x, y, z) => new THREE.Vector3(x, z, -y);   // layout (x, y, up) -> three (x, up, -y)
-const [minx, miny, maxx, maxy] = DATA.bounds;
+// The overview frames the notes' bounds and the Reef lake with its sand and bank (C9.1 puts the lake outside them).
+const [minx, miny, maxx, maxy] = (() => {
+  const b = DATA.bounds.slice(), lake = (DATA.design.lake || [])[0];
+  if (lake) {
+    const g = (lake.shore ? lake.shore.sand : 0) + 0.4, c = Math.cos(lake.angle), s = Math.sin(lake.angle);
+    const hx = Math.hypot((lake.rx + g) * c, (lake.ry + g) * s), hy = Math.hypot((lake.rx + g) * s, (lake.ry + g) * c);
+    b[0] = Math.min(b[0], lake.cx - hx); b[1] = Math.min(b[1], lake.cy - hy);
+    b[2] = Math.max(b[2], lake.cx + hx); b[3] = Math.max(b[3], lake.cy + hy);
+  }
+  return b;
+})();
 const center = W((minx + maxx) / 2, (miny + maxy) / 2 - 2, 4.0);
 const R = Math.hypot(maxx - minx, maxy - miny) / 2 * 0.62;
 function fitDistance() {
@@ -879,6 +890,8 @@ __SOCIETY__
 // The bridge light packets ride the beat through the Lights limiter (roads.js, C6.4).
 if (roadNet && roadNet.attachLights) roadNet.attachLights();
 
+__NATURE__
+
 __CROWD__
 
 // ------------------------------------------------------------------ state + week update
@@ -1189,7 +1202,7 @@ tier.apply();
 rave.update(0);
 freezeStatic();
 const compilation = compileWorld();
-window.__vc = { explore, hud, rave, beat, lights, tier, crowd, venues, stages, roads: roadNet, compilation, scene, cityMat, placeCamera, flyTo, audio: cityAudio, setIsolate, carState, cars, nodes, kinds, edges, state, routes, sampleRoute, poseOnRoute, pointBlocked, clearSight, camera, controls, renderer, people, peopleGroup, startRide, stopRide, updateWeek };
+window.__vc = { nature, explore, hud, rave, beat, lights, tier, crowd, venues, stages, roads: roadNet, compilation, scene, cityMat, placeCamera, flyTo, audio: cityAudio, setIsolate, carState, cars, nodes, kinds, edges, state, routes, sampleRoute, poseOnRoute, pointBlocked, clearSight, camera, controls, renderer, people, peopleGroup, startRide, stopRide, updateWeek };
 $('city-census').textContent = DATA.districts.length + ' districts / ' + nodes.length.toLocaleString() + ' addresses';
 $('loading').classList.add('ready');
 explore.openHash(location.hash);
@@ -1253,6 +1266,7 @@ function frame() {
     updateCars(reduced ? 0 : dt);
     updatePeople(reduced ? 0 : dt, now);
     updateStages();
+    nature.update(reduced ? 0 : dt);
     updateAtmosphere(reduced ? 0 : now);
     for (let k = 0; k < craneNodes.length; k++) { const n = craneNodes[k]; dummy.position.copy(n.craneBase); dummy.rotation.set(0, (reduced ? 0 : now * 0.12) + k * 1.3, 0); dummy.scale.set(1, n.state === 'absent' ? 0.0001 : n.h + 1.4, 1); dummy.updateMatrix(); cranes.mesh.setMatrixAt(k, dummy.matrix); }
     cranes.mesh.instanceMatrix.needsUpdate = true;

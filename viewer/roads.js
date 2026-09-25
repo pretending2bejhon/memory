@@ -151,30 +151,6 @@ const roadNet=(()=>{
     return best;
   }
 
-  // Temporary decks until V7 dresses the shore: the pier on four posts and the island base under the
-  // Reef Island Stage. Plain and dark, one draw call, no light of their own.
-  if(lake){
-    const pos=[],colr=[],p=lake.pier,isl=lake.island,top=[.028,.034,.044],side=[.011,.013,.018];
-    const quad=(a,b,c,d,shade)=>{for(const v of [a,b,c,a,c,d]){pos.push(...v);colr.push(...shade);}};
-    const box=(x0,y0,x1,y1,w,zBot,zTop)=>{
-      const ux=x1-x0,uy=y1-y0,l=Math.hypot(ux,uy)||1,nx=-uy/l*w/2,ny=ux/l*w/2;
-      const c=[[x0+nx,y0+ny],[x1+nx,y1+ny],[x1-nx,y1-ny],[x0-nx,y0-ny]].map(q=>[q[0],q[1]]);
-      const Wv=(q,h)=>[q[0],h,-q[1]];
-      quad(Wv(c[0],zTop),Wv(c[3],zTop),Wv(c[2],zTop),Wv(c[1],zTop),top);
-      for(let i=0;i<4;i++){const a=c[i],b=c[(i+1)%4];quad(Wv(a,zBot),Wv(b,zBot),Wv(b,zTop),Wv(a,zTop),side);}
-    };
-    box(p.x0,p.y0,p.x1,p.y1,p.width,p.z-.06,p.z);
-    for(const t of [.2,.5,.8]){const x=p.x0+(p.x1-p.x0)*t,y=p.y0+(p.y1-p.y0)*t,ux=p.x1-p.x0,uy=p.y1-p.y0,l=Math.hypot(ux,uy);
-      for(const s of [-1,1]){const cx=x-uy/l*s*.19,cy=y+ux/l*s*.19;box(cx-.03,cy,cx+.03,cy,.06,lake.z-.1,p.z-.06);}}
-    const R=isl.r+.06,hBot=lake.z-.1,hTop=isl.z-.12,N=48;
-    for(let k=0;k<N;k++){const a0=k/N*Math.PI*2,a1=(k+1)/N*Math.PI*2;
-      const q0=[isl.x+Math.cos(a0)*R,isl.y+Math.sin(a0)*R],q1=[isl.x+Math.cos(a1)*R,isl.y+Math.sin(a1)*R];
-      quad([q0[0],hBot,-q0[1]],[q1[0],hBot,-q1[1]],[q1[0],hTop,-q1[1]],[q0[0],hTop,-q0[1]],side);
-      pos.push(isl.x,hTop,-isl.y,q1[0],hTop,-q1[1],q0[0],hTop,-q0[1]);colr.push(...top,...top,...top);}
-    const g=new THREE.BufferGeometry();g.setAttribute('position',new THREE.Float32BufferAttribute(pos,3));g.setAttribute('color',new THREE.Float32BufferAttribute(colr,3));
-    const decks=new THREE.Mesh(g,new THREE.MeshBasicMaterial({vertexColors:true,fog:true,side:THREE.DoubleSide}));
-    decks.name='reef-temporary-decks';scene.add(decks);
-  }
   const rim=D.routes.find(r=>r.kind==='rim')||null;
   return {graph,bridges,rim,lake:lake||null,streets:D.streets||[],tour,surfaceAtRoad,edgePoints,turnArc:arc};
 })();

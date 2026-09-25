@@ -283,8 +283,12 @@ def measure_scene(engine, scene, path, baseline, phase=0):
         setup = engine.evaluate(V6_S3_SETUP, False)
         if not setup["ok"] or not setup["onBike"]:
             raise RuntimeError("S3 bike could not enter the Memory Causeway")
+    if key == "S4" and phase >= 6:
+        engine.evaluate("() => window.__vc.nature.cameraS4()")
     settle_room(engine)
     engine.wait(12)
+    if key == "S4" and phase >= 6:
+        engine.evaluate("() => window.__vc.nature.cameraS4()")
     if key == "S3" and phase >= 5:
         wait_probe(engine, """() => {const e=window.__vc.explore,p=e.player;
           return e.bike.boosting&&e.surfaces.probe(p.x,p.z,p.y)&&
@@ -2216,6 +2220,34 @@ def main():
                     eng.evaluate("() => window.__vc.updateWeek(12)")
                     report["roads"], roads_checks = verify_roads(eng)
                     checks.update(roads_checks)
+                if phase >= 6:
+                    # V7 (C9, C10): data gates (lake, trees, shore structures), the landing overview frames the lake,
+                    # the lake surface for explore.js, the drawn shore off the ring, shared sky, kick rings, census, S4
+                    # flash, flocks, water, boats, behaviours, dog chase at boost, reduced motion. The S4 flash runs
+                    # before the gates that reload the page and turns the sound on itself, so its trace is the page
+                    # with sound.
+                    import qa_nature
+                    design = json.loads((ROOT / "data" / "city-design.json").read_text(encoding="utf-8"))
+                    report["nature"] = qa_nature.data_gates(design)
+                    lake = design["lake"][0]
+                    for name, fn in (("overview", lambda e: qa_nature.verify_overview(e, design)),
+                                     ("surface", lambda e: qa_nature.verify_surface(e, design)),
+                                     ("shoreMesh", lambda e: qa_nature.verify_shore_mesh(e, design)),
+                                     ("materials", qa_nature.verify_materials), ("kickRings", qa_nature.verify_kick_rings),
+                                     ("census", qa_nature.verify_census),
+                                     ("s4", lambda e: qa_nature.verify_s4(e, path)),
+                                     ("s4Flash", lambda e: qa_nature.verify_s4_flash(e, path)),
+                                     ("flocks", qa_nature.verify_flocks),
+                                     ("water", lambda e: qa_nature.verify_no_water_walkers(e, lake)),
+                                     ("boats", lambda e: qa_nature.verify_boats(e, lake)),
+                                     ("behaviours", qa_nature.verify_behaviours),
+                                     ("dogChase", qa_nature.verify_dog_chase),
+                                     ("reduced", qa_nature.verify_reduced)):
+                        rep, chk, ctl = fn(eng)
+                        report["nature"][name] = {"report": rep, "checks": chk, "controls": ctl}
+                    for part in report["nature"].values():
+                        checks.update(part["checks"])
+                        checks.update({"positive control: " + k: v for k, v in part["controls"].items()})
                 report["lightPolicy"], policy_checks = verify_light_policy(eng)
                 checks.update(policy_checks)
                 report["governor"] = verify_governor(eng, args.url)
@@ -2298,6 +2330,8 @@ def main():
         checks.setdefault("S3 bike boosted on the Memory Causeway", False)
         for name in V6_CHECK_NAMES:
             checks.setdefault(name, False)
+    if phase >= 6:
+        checks.setdefault("V7 nature gates ran", "nature" in report)
     page = ROOT / "dist" / "index.html"
     report["publicBytes"] = page.stat().st_size if page.exists() else None
     checks["public page at most 900 KB"] = report["publicBytes"] is not None and report["publicBytes"] <= 900_000

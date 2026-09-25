@@ -6,7 +6,9 @@ const peopleGroup=new THREE.Group();scene.add(peopleGroup);
 const CROWD_CAPS={3:{walkers:400,dancers:480,extras:88},2:{walkers:240,dancers:288,extras:53},1:{walkers:100,dancers:88,extras:20}};
 // Chiva riders ride with their chiva; society.js reserves their share of each extras cap from the chiva ranks.
 const riderReserve=typeof venueRiderReserve!=='undefined'?venueRiderReserve:{1:0,2:0,3:0};
-const extrasCap=level=>Math.max(0,CROWD_CAPS[level].extras-riderReserve[level]);
+// The lake's people reserve their share of each tier's crowd cap.
+const lakeReserve=typeof nature!=='undefined'?nature.reserve:{1:0,2:0,3:0};
+const extrasCap=level=>Math.max(0,CROWD_CAPS[level].extras-riderReserve[level]-lakeReserve[level]);
 
 // ------------------------------------------------------------------ outfits (C3.2, C3.3)
 const pickFrom=(rnd,list,weights)=>{
@@ -169,7 +171,7 @@ const djs=stages.map(s=>{const p=s.booth.clone().addScaledVector(s.facing,.2);
   const person={kind:2,district:s.district,stage:s.index,x:p.x,y:s.z,z:p.z,yaw:s.yaw,offset:0,scale:1.02,energy:1,style:'dj',seed:crowdRnd(),outfit:dress(s.district,crowdRnd,2)};
   people.push(person);return person;});
 // V3 adds seated, vending, queueing and riding people through crowd.extras before this runs.
-const extraPeople=(typeof venueExtras!=='undefined'?venueExtras:[]).map(e=>{const person={kind:3,offset:0,energy:1,seed:crowdRnd(),scale:.92+crowdRnd()*.18,...e,outfit:dress(e.district,crowdRnd,e.archetype,e.job)};
+const extraPeople=(typeof venueExtras!=='undefined'?venueExtras:[]).concat(typeof nature!=='undefined'?nature.extras:[]).map(e=>{const person={kind:3,offset:0,energy:1,seed:crowdRnd(),scale:.92+crowdRnd()*.18,...e,outfit:dress(e.district,crowdRnd,e.archetype,e.job)};
   if(e.bottle)person.outfit.acc.bottle=pickFrom(crowdRnd,['#2f5a1e','#5a3514','#c7d7c9']);
   // Terrace dancers take the room style like the stage crowd (C3.5): the room's own at 70 %, else an alternate.
   if(person.pose==='dance'&&!person.style){const room=STYLE_BY_ROOM[person.district]||'bounce';person.style=crowdRnd()<.7?room:pickFrom(crowdRnd,STYLE_ALTS[room]);}
@@ -411,6 +413,7 @@ function updatePeople(dt,now){
     POSE_IN[0]=live?t:0;
     if(!live){stillPose(p.kind===3?p.pose:'stand',pose);if(p.kind===0)walkPose(false,pose);}
     else if(p.kind===0)walkPose(p.relaxed,pose);
+    else if(p.kind===3&&p.pose==='walk')walkPose(p.relaxed,pose);
     else if(p.kind===3&&p.pose!=='ride'&&p.pose!=='dance'){stillPose(p.pose,pose);
       // Seated patrons raise the bottle for one bar on the drop.
       if(p.pose==='sit'){const since=b.totalBeats-dropBeat;if(since>=0&&since<4){pose.aA=-2.75;pose.bA=.12;pose.nod=-.15;}}}
@@ -510,6 +513,6 @@ const crowd={avatar,avatarIndex:AVATAR,dressAvatar,showAvatar,notice,dress,debug
   walkPose(t,relaxed,out){POSE_IN[0]=t;walkPose(relaxed,out);},
   stillPose(kind,t,out){POSE_IN[0]=t;stillPose(kind,out);},
   joints:J,attach:ACCESSORY_ATTACH,styleByRoom:STYLE_BY_ROOM,
-  people,parts:personParts,accessories:accessoryMeshes,stages,stageSlots,djs,extras:extraPeople,caps:CROWD_CAPS,riderReserve,state:crowdState,census,
+  people,parts:personParts,accessories:accessoryMeshes,stages,stageSlots,djs,extras:extraPeople,caps:CROWD_CAPS,riderReserve,lakeReserve,state:crowdState,census,
   setTimeline(stats){lastStats=stats;setTimeline(stats);},applyTier:applyCrowdTier,isVisible,
   get count(){return census();}};
