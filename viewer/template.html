@@ -1196,13 +1196,15 @@ __HUD__
 
 __EXPLORE__
 
+__TOUR__
+
 const clock = new THREE.Clock();
 updateWeek(LAST);
 tier.apply();
 rave.update(0);
 freezeStatic();
 const compilation = compileWorld();
-window.__vc = { nature, explore, hud, rave, beat, lights, tier, crowd, venues, stages, roads: roadNet, compilation, scene, cityMat, placeCamera, flyTo, audio: cityAudio, setIsolate, carState, cars, nodes, kinds, edges, state, routes, sampleRoute, poseOnRoute, pointBlocked, clearSight, camera, controls, renderer, people, peopleGroup, startRide, stopRide, updateWeek };
+window.__vc = { nature, explore, tour: grandTour, hud, rave, beat, lights, tier, crowd, venues, stages, roads: roadNet, compilation, scene, cityMat, placeCamera, flyTo, audio: cityAudio, setIsolate, carState, cars, nodes, kinds, edges, state, routes, sampleRoute, poseOnRoute, pointBlocked, clearSight, camera, controls, renderer, people, peopleGroup, startRide, stopRide, updateWeek };
 $('city-census').textContent = DATA.districts.length + ' districts / ' + nodes.length.toLocaleString() + ' addresses';
 $('loading').classList.add('ready');
 explore.openHash(location.hash);

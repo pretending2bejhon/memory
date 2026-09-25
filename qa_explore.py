@@ -472,8 +472,11 @@ V6_DEEP_LINKS = {
         return e.active && !e.photo.active && v.state.ride < 0 && v.audio.desired === 'working' && Math.hypot(e.player.x - s.x, e.player.z + s.y) < s.r
           && location.hash === '#explore/downtown'; }""",
     '#explore/prasma-campus': """() => { const v = window.__vc, e = v.explore; return e.active && v.audio.desired === 'prasma'; }""",
-    '#ride': """() => { const v = window.__vc; return v.state.ride >= 0 && !v.explore.active; }""",
-    '#ride/archive': """() => { const v = window.__vc; return v.state.ride >= 0 && v.routes[v.state.ride].district === 'episodic' && !v.explore.active; }""",
+    '#ride': """() => { const v = window.__vc; return v.state.ride >= 0 && v.tour.active
+        && v.explore.active && v.explore.player.onBike; }""",
+    '#ride/archive': """() => { const v = window.__vc; return v.state.ride >= 0 && v.tour.active
+        && v.explore.active && v.explore.player.onBike
+        && v.roads.tour.legs[v.state.ride]?.from === 'episodic'; }""",
     '#photo': """() => { const v = window.__vc, e = v.explore, c = v.camera.position, p = e.player;
         return e.active && e.photo.active && e.frozen && document.body.classList.contains('photo')
           && Math.hypot(c.x - p.x, c.y - p.y, c.z - p.z) < 2.5 && window.__qa.avatarDrawn(); }""",
@@ -626,10 +629,12 @@ def verify_v6_extras(eng, url, control=False):
       e.pilot = input => { input.throttle = control ? 0 : 1; input.steer = 0; input.fast = false; if (control) e.bike.speed = 2; };
       setTimeout(() => { e.pilot = null; const n = v.crowd.people.filter(q => q.kind === 1 && q.cheerAt !== undefined).length; done({cheered: n, speedAtEnd: e.bike.speed}); }, 700); })""", control)
     out['cheer'] = cheer
-    # R hook: with no tour installed, R leaves explore for Ride along on the district you stand in.
+    # R hook starts the tour on the bike in the district where the visitor stands.
     page.keyboard.press('KeyE'); eng.wait(.2)
     page.keyboard.press('KeyR'); eng.wait(.6)
-    out['rHook'] = v6_ev(page, "() => { const v = window.__vc; return !v.explore.active && v.state.ride >= 0 && v.routes[v.state.ride].district === 'working'; }")
+    out['rHook'] = v6_ev(page, """() => { const v = window.__vc; return v.state.ride >= 0 && v.tour.active
+        && v.explore.active && v.explore.player.onBike
+        && v.roads.tour.legs[v.state.ride]?.from === 'working'; }""")
     # Absent buildings do not collide (C8.4): at week 0 a later note's footprint is open ground, a week-0 note's is not.
     absent = v6_ev(page, """() => { const v = window.__vc, e = v.explore; v.updateWeek(0);
       const later = v.nodes.find(n => n.state === 'absent'), early = v.nodes.find(n => n.state !== 'absent' && n.created !== null);

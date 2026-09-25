@@ -262,12 +262,16 @@ def settle_room(engine):
 def measure_scene(engine, scene, path, baseline, phase=0):
     key = scene["id"]
     name = ("Downtown stage, on-foot avatar" if key == "S2" and phase >= 5 else
-            "Bike at boost on the Memory Causeway" if key == "S3" and phase >= 5 else scene["name"])
+            "Bike at boost on the Memory Causeway" if key == "S3" and phase >= 5 else
+            "Grand Tour through a room drop" if key == "S5" and phase >= 7 else scene["name"])
     print("Measuring " + key + ": " + name + ", 60 seconds, sound on", flush=True)
     engine.evaluate("() => window.__vc.updateWeek(12)")
     set_mode(engine, "ride" if key == "S3" and phase < 5 else "overview")
     if key == "S5":
-        engine.evaluate("() => window.__vc.setIsolate('working')")
+        if phase >= 7:
+            engine.evaluate("() => window.__vc.startRide()")
+        else:
+            engine.evaluate("() => window.__vc.setIsolate('working')")
     if key == "S2" and phase >= 5:
         engine.evaluate("() => window.__vc.explore.openHash('#explore/downtown')")
         engine.evaluate(V6_S2_SPOT)
@@ -296,13 +300,17 @@ def measure_scene(engine, scene, path, baseline, phase=0):
     engine.screenshot(path("world-" + key.lower() + ".png"))
     if key == "S3" and phase >= 5:
         engine.evaluate("() => {const q=window.__qaS3;q.boostDeckMs=0;q.deckMs=0;q.laps=0;}")
+    s5_before = engine.evaluate("""() => {const v=window.__vc;return {active:v.tour.active,
+      crossings:v.tour.debug.crossings.length,serial:v.beat.transition.serial,room:v.beat.room};}""") if key == "S5" and phase >= 7 else None
     engine.evaluate(FRAME_TRACE)
-    if key == "S5":
+    if key == "S5" and phase < 7:
         engine.wait(2)
         engine.evaluate("() => window.__vc.setIsolate('procedural')")
     wait_probe(engine, "() => window.__qaWorldFrames.done", 75)
     trace = engine.evaluate("() => window.__qaWorldFrames")
     s3 = engine.evaluate("() => window.__qaS3") if key == "S3" and phase >= 5 else None
+    s5_after = engine.evaluate("""() => {const v=window.__vc;return {active:v.tour.active,
+      crossings:v.tour.debug.crossings.slice(),serial:v.beat.transition.serial,room:v.beat.room};}""") if s5_before else None
     if key in ("S2", "S3") and phase >= 5:
         engine.evaluate("() => {const e=window.__vc.explore;e.pilot=null;if(e.active)e.leave();delete window.__qaS3;}")
     path("world-" + key.lower() + "-frames.json").write_text(json.dumps(trace), encoding="utf-8")
@@ -310,15 +318,23 @@ def measure_scene(engine, scene, path, baseline, phase=0):
     tiers = metrics["tiers"]
     tier_pass = bool(tiers) and all(tier is not None and tier >= 2 for tier in tiers)
     boost_pass = (s3["boostDeckMs"] >= 2000 and s3["deckMs"] >= 4000 and s3["laps"] >= 1) if s3 else None
+    tour_pass = (s5_before["active"] and s5_after["active"] and
+                 len(s5_after["crossings"]) > s5_before["crossings"] and
+                 s5_after["serial"] > s5_before["serial"] and
+                 all(row["roomAtCrossing"] == row["to"] for row in
+                     s5_after["crossings"][s5_before["crossings"]:])) if s5_before else None
     return {**scene, "name": name, "available": True, "required": True, "measured": True,
             "tier": "legacy desktop, no tier API" if baseline else metrics["settledTier"],
             "metrics": metrics, "numericBudgetPass": perf_pass(metrics),
             "settledTierPass": tier_pass, "s3Telemetry": s3, "boostPass": boost_pass,
-            "passed": perf_pass(metrics) and tier_pass and (boost_pass is not False)}
+            "s5Telemetry": {"before": s5_before, "after": s5_after} if s5_before else None,
+            "tourTransitionPass": tour_pass,
+            "passed": perf_pass(metrics) and tier_pass and (boost_pass is not False) and (tour_pass is not False)}
 
 
-def measure_heap(engine, path):
-    print("Measuring Heap: 5-minute focus, timeline and 60-second ride session", flush=True)
+def measure_heap(engine, path, phase=0):
+    print("Measuring Heap: 5-minute Grand Tour" if phase >= 7 else
+          "Measuring Heap: 5-minute focus, timeline and 60-second ride session", flush=True)
     set_mode(engine, "overview")
     session = engine.context.new_cdp_session(engine.page)
     session.send("Performance.enable")
@@ -329,33 +345,47 @@ def measure_heap(engine, path):
     start_heap = used()
     start = time.monotonic()
     rows = []
-    for room in ROOM_IDS:
-        engine.evaluate("room => window.__vc.setIsolate(room)", room)
-        engine.wait(12)
-        rows.append({"action": "focus", "district": room, "elapsed": time.monotonic() - start,
+    if phase >= 7:
+        engine.evaluate("() => window.__vc.startRide()")
+        while time.monotonic() - start < 300:
+            engine.wait(min(30, 300 - (time.monotonic() - start)))
+            progress = engine.evaluate("""() => {const v=window.__vc;return {
+              active:v.tour.active,leg:v.tour.leg,ride:v.state.ride,
+              crossings:v.tour.debug.crossings.length,surfaceGaps:v.tour.debug.surfaceGaps};}""")
+            rows.append({"action": "Grand Tour", "elapsed": time.monotonic() - start,
+                         "heapBytes": used(), **progress})
+    else:
+        for room in ROOM_IDS:
+            engine.evaluate("room => window.__vc.setIsolate(room)", room)
+            engine.wait(12)
+            rows.append({"action": "focus", "district": room, "elapsed": time.monotonic() - start,
+                         "heapBytes": used()})
+        set_mode(engine, "overview")
+        engine.evaluate("() => window.__vc.updateWeek(0)")
+        engine.click("#play")
+        timeline = wait_probe(engine, """() => {const s=window.__vc.state;
+          return !s.playing&&s.t>=12?{week:s.t,playing:s.playing}:false;}""", 35)
+        rows.append({"action": "Play control, timeline 0 through 12", "elapsed": time.monotonic() - start,
+                     "completed": timeline, "heapBytes": used()})
+        set_mode(engine, "ride")
+        engine.wait(60)
+        rows.append({"action": "Archive ride 60 seconds", "elapsed": time.monotonic() - start,
                      "heapBytes": used()})
-    set_mode(engine, "overview")
-    engine.evaluate("() => window.__vc.updateWeek(0)")
-    engine.click("#play")
-    timeline = wait_probe(engine, """() => {const s=window.__vc.state;
-      return !s.playing&&s.t>=12?{week:s.t,playing:s.playing}:false;}""", 35)
-    rows.append({"action": "Play control, timeline 0 through 12", "elapsed": time.monotonic() - start,
-                 "completed": timeline, "heapBytes": used()})
-    set_mode(engine, "ride")
-    engine.wait(60)
-    rows.append({"action": "Archive ride 60 seconds", "elapsed": time.monotonic() - start,
-                 "heapBytes": used()})
-    set_mode(engine, "overview")
-    while time.monotonic() - start < 300:
-        engine.wait(min(30, 300 - (time.monotonic() - start)))
+        set_mode(engine, "overview")
+        while time.monotonic() - start < 300:
+            engine.wait(min(30, 300 - (time.monotonic() - start)))
     session.send("HeapProfiler.collectGarbage")
     end_heap = used()
     result = {"measured": True, "seconds": time.monotonic() - start,
               "startBytes": start_heap, "endBytes": end_heap,
               "growthBytes": end_heap - start_heap, "garbageCollectedBeforeAndAfter": True,
-              "actions": rows, "passed": end_heap - start_heap <= 40_000_000}
+              "actions": rows, "passed": end_heap - start_heap <= 40_000_000 and
+              (phase < 7 or (bool(rows) and all(row["active"] and row["ride"] >= 0 and
+               row["surfaceGaps"] == 0 for row in rows) and rows[-1]["crossings"] > 0))}
     path("world-heap.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
     session.detach()
+    if phase >= 7:
+        engine.evaluate("() => window.__vc.stopRide()")
     return result
 
 
@@ -2176,7 +2206,9 @@ def main():
                 checks[scene["id"] + " settled tier at least 2"] = item["settledTierPass"]
                 if scene["id"] == "S3" and phase >= 5:
                     checks["S3 bike boosted on the Memory Causeway"] = item["boostPass"]
-            report["heapSession"] = measure_heap(eng, path)
+                if scene["id"] == "S5" and phase >= 7:
+                    checks["S5 Grand Tour crosses a room drop"] = item["tourTransitionPass"]
+            report["heapSession"] = measure_heap(eng, path, phase)
             checks["five-minute session heap growth at most 40 MB"] = report["heapSession"]["passed"]
             report["flash"] = []
             if args.baseline:
@@ -2296,6 +2328,11 @@ def main():
                 if phase >= 5:
                     report["explore"], explore_checks = verify_explore(eng, args.url)
                     checks.update(explore_checks)
+                if phase >= 7:
+                    from qa_tour import verify_tour
+                    report["tour"] = verify_tour(eng, args.url, args.prefix, output)
+                    checks.update(report["tour"]["checks"])
+                    checks.update(report["tour"]["positiveControls"])
             report["errors"] = list(eng.errors)
     except Exception as error:
         report["errors"].append(str(error))
@@ -2332,6 +2369,15 @@ def main():
             checks.setdefault(name, False)
     if phase >= 6:
         checks.setdefault("V7 nature gates ran", "nature" in report)
+    if phase >= 7:
+        checks.setdefault("S5 Grand Tour crosses a room drop", False)
+        for name in ("tour: every planned boundary crossed within one beat of its drop",
+                     "tour: cut beat stays on every bridge deck longer than a beat",
+                     "tour: at least eight bars of groove before every next transition",
+                     "tour: all rooms and road surfaces remain valid",
+                     "tour: sound remains on for the whole run", "tour: browser errors",
+                     "tour: disabling speed control misses a drop by more than one beat"):
+            checks.setdefault(name, False)
     page = ROOT / "dist" / "index.html"
     report["publicBytes"] = page.stat().st_size if page.exists() else None
     checks["public page at most 900 KB"] = report["publicBytes"] is not None and report["publicBytes"] <= 900_000

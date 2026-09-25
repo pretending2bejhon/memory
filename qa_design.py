@@ -733,6 +733,68 @@ def run(design, layout, quiet=False):
     gate("tour: chase camera clear every 0.1", cam == 0 and camdeck == 0,
          f"{cam} samples inside a footprint, {camdeck} under an overpass deck")
 
+    # C7 chase view: the bike eye is 0.75 behind and 0.32 up, with the same
+    # pull-in used by explore.js. The tour can add laps on a district ring, so
+    # sweep both its published walk and every ring it may use at 0.1 units.
+    chase_bad, chase_count = [], 0
+    chase_paths = [("tour", smp)]
+    ring_indices = {ri for ri, route in enumerate(routes)
+                    if any(route["district"] == leg["from"] for leg in tour["legs"])}
+    for ri in sorted(ring_indices):
+        route = routes[ri]
+        path, _ = resample([p + [route["z"]] for p in route["points"]], closed=True)
+        chase_paths.append((f"ring {ri}", path))
+    for label, path in chase_paths:
+        for i, (x, y, z, *_rest) in enumerate(path):
+            nx, ny = path[(i + 1) % len(path)][:2]
+            dx, dy = nx - x, ny - y
+            length = math.hypot(dx, dy)
+            if length < 1e-9:
+                continue
+            dx, dy = dx / length, dy / length
+            pivot = (x, y, z + .2)
+            want = (x - dx * .75, y - dy * .75, z + .32 - .12 * .4)
+            eye = None
+            for step in range(9):
+                t = 1 - step * .11
+                candidate = tuple(a + (b - a) * t for a, b in zip(pivot, want))
+                span = math.dist(pivot[:2], candidate[:2])
+                count = max(1, math.ceil(span / .1))
+                sight = all(not W.blocked(
+                    pivot[0] + (candidate[0] - pivot[0]) * j / count,
+                    pivot[1] + (candidate[1] - pivot[1]) * j / count,
+                    pivot[2] + (candidate[2] - pivot[2]) * j / count, .1)
+                    for j in range(1, count + 1))
+                if sight:
+                    eye = candidate
+                    break
+            if eye is None:
+                eye = tuple(a + (b - a) * .12 for a, b in zip(pivot, want))
+            ex, ey, ez = eye
+            # Match the viewer's camera floor at the eye, where a rising bridge
+            # can be higher than the bike's current deck sample.
+            under_eye = []
+            for _, ax, ay, bx, by, za, zb, half in W.roads.near(ex, ey):
+                d, t = seg_dist(ex, ey, ax, ay, bx, by)
+                if d <= half:
+                    under_eye.append(za + (zb - za) * t)
+            ground = min(under_eye, key=lambda h: abs(h - (z + .3))) if under_eye else z
+            ez = max(ez, max(ground, z) + .32)
+            blocked = W.blocked(ex, ey, ez, .14)
+            under_deck = False
+            for owner, ax, ay, bx, by, za, zb, half in W.roads.near(ex, ey):
+                if owner[0] != "bridge":
+                    continue
+                d, t = seg_dist(ex, ey, ax, ay, bx, by)
+                if d < half + .13 and abs(za + (zb - za) * t - ez) < .14:
+                    under_deck = True
+                    break
+            chase_count += 1
+            if (blocked or under_deck) and len(chase_bad) < 10:
+                chase_bad.append((label, round(i * .1, 1), blocked, under_deck))
+    gate("tour: actual bike chase camera clear every 0.1", not chase_bad,
+         f"{len(chase_bad)} blocked samples shown of {chase_count}, first {chase_bad[:3]}")
+
     # 8. The lake, pier and island (C9.1, C9.4).
     lake = design["lake"][0]
     shore, gap, lower = ellipse(lake)
@@ -1239,6 +1301,13 @@ def control(page, layout):
             p[0], p[1] = bx, by
         return [g("tour: chase camera")]
 
+    def bikecam_break(d):
+        pts = d["tour"]["points"]
+        bx, by, _, _ = box_of(d, pts[400][0], pts[400][1])
+        for p in pts[398:403]:
+            p[0], p[1] = bx, by
+        return [g("tour: actual bike chase camera")]
+
     def shore_break(d):
         lk, reef = d["lake"][0], D["reef"]
         ux, uy = lk["cx"] - reef["cx"], lk["cy"] - reef["cy"]
@@ -1374,7 +1443,7 @@ def control(page, layout):
     breaks = (count_break, graph_break, turn_break, side_break, move_break, grade_break, bend_break, foot_break,
               lane_break, plateau_break, separation_break, stack_break, corner_break, camdeck_break, junction_break, fillet_break,
               street_break, ccw_break, tour_gap_break, tour_break, entry_break, loop_break, offroad_break,
-              tourcam_break, shore_break, lake_break, lakebridge_break, pier_break, booth_break, stage_break,
+              tourcam_break, bikecam_break, shore_break, lake_break, lakebridge_break, pier_break, booth_break, stage_break,
               venue_break, furniture_break, truth_break, truth_break2, rim_stage_break, rim_terrace_break,
               rim_furniture_break, c41_lane_break, c41_pair_break, c41_foot_break, c41_terrace_break, c41_stage_break,
               page_s0_break, page_fillet_break, page_trim_break, page_count_break)

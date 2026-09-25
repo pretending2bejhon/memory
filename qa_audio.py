@@ -504,11 +504,21 @@ def main():
             engine.click("#ride")
             engine.wait(.2)
             report["ride"] = audio_state(engine)
-            report["checks"]["ride routes to district room"] = report["ride"]["room"] == "working"
+            report["rideTour"] = engine.evaluate("""() => { const v = window.__vc;
+              return {active: v.tour.active, leg: v.state.ride,
+                district: v.roads.tour.legs[v.state.ride]?.from,
+                onBike: v.explore.active && v.explore.player.onBike}; }""")
+            report["checks"]["ride routes to district room"] = (report["ride"]["room"] == "working"
+                and report["rideTour"]["active"] and report["rideTour"]["leg"] >= 0
+                and report["rideTour"]["district"] == "working" and report["rideTour"]["onBike"])
             engine.page.keyboard.press("Escape")
             wait_room(engine, "skyline")
             report["rideExit"] = audio_state(engine)
-            report["checks"]["ride exit returns to skyline"] = report["rideExit"]["room"] == "skyline"
+            report["rideExitTour"] = engine.evaluate("""() => { const v = window.__vc;
+              return {active: v.tour.active, leg: v.state.ride, exploring: v.explore.active}; }""")
+            report["checks"]["ride exit returns to skyline"] = (report["rideExit"]["room"] == "skyline"
+                and not report["rideExitTour"]["active"] and report["rideExitTour"]["leg"] == -1
+                and not report["rideExitTour"]["exploring"])
             engine.click(".chip:first-child")
             engine.evaluate("() => window.__vc.audio.setRoom('working')")
             wait_room(engine, "working")

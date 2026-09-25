@@ -1,6 +1,6 @@
-// A route-mounted lens avoids the corner-cutting of a world-space chase camera.
+// Keep the V4 route clearance helper for its independent static gate.
 const rideBadge=$('ride-badge');
-let rideDistance=0,savedOverview=null;
+let shownLeg=-1;
 const rideEye=new THREE.Vector3(),rideLook=new THREE.Vector3(),lastSafeEye=new THREE.Vector3();
 const ridePose={eye:rideEye,look:rideLook};
 function poseOnRoute(route,distance) {
@@ -14,29 +14,23 @@ function poseOnRoute(route,distance) {
   return ridePose;
 }
 function startRide() {
-  if(state.ride>=0)return;
-  const ri=state.isolate?routes.findIndex(r=>r.district===state.isolate):0;
-  state.ride=Math.max(0,ri);rideDistance=routes[state.ride].length*.28;
-  cityAudio.setRoom(routes[state.ride].district);
-  savedOverview={position:camera.position.clone(),target:controls.target.clone(),fov:camera.fov,autoRotate:controls.autoRotate};
-  controls.enabled=false;controls.autoRotate=false;focusGoal=null;select(-1);setHover(-1);
-  camera.fov=62;camera.updateProjectionMatrix();
-  lastSafeEye.copy(sampleRoute(routes[state.ride],rideDistance));lastSafeEye.y+=.64;
-  const pose=poseOnRoute(routes[state.ride],rideDistance);camera.position.copy(pose.eye);camera.lookAt(pose.look);
-  document.body.classList.add('riding');rideBadge.hidden=false;$('ride-route').textContent=routes[state.ride].district==='episodic'?routes[state.ride].name:styleOf(routes[state.ride].district).name+' circuit';
-  $('ride').classList.add('on');$('ride').textContent='Leave ride';$('ride').setAttribute('aria-pressed','true');
+  return grandTour.start();
 }
 function stopRide() {
-  if(state.ride<0)return;
-  cityAudio.setRoom('skyline');cityAudio.setRideHeading(null);
-  state.ride=-1;controls.enabled=true;rideBadge.hidden=true;document.body.classList.remove('riding');
-  $('ride').classList.remove('on');$('ride').textContent='Ride along';$('ride').setAttribute('aria-pressed','false');
-  if(savedOverview) {camera.position.copy(savedOverview.position);controls.target.copy(savedOverview.target);camera.fov=savedOverview.fov;controls.autoRotate=savedOverview.autoRotate;camera.updateProjectionMatrix();}
-  controls.update();
+  return grandTour.stop();
 }
-function updateRide(dt) {
-  const route=routes[state.ride];if(!route)return;
-  rideDistance=(rideDistance+dt*(reduced?.55:1.15))%route.length;
-  const pose=poseOnRoute(route,rideDistance);camera.position.copy(pose.eye);camera.lookAt(pose.look);
-  cityAudio.setRideHeading(Math.atan2(pose.look.x-pose.eye.x,pose.look.z-pose.eye.z));
+function setRideUI(active) {
+  document.body.classList.toggle('riding',active);
+  rideBadge.hidden=!active;
+  $('ride').classList.toggle('on',active);
+  $('ride').textContent=active?'Leave ride':'Ride along';
+  $('ride').setAttribute('aria-pressed',String(active));
+  shownLeg=-1;
+  if(active)updateRide();
+}
+function updateRide() {
+  if(state.ride<0||state.ride===shownLeg)return;
+  const leg=roadNet.tour.legs[state.ride];if(!leg)return;
+  shownLeg=state.ride;
+  $('ride-route').textContent=styleOf(leg.from).name+' to '+styleOf(leg.to).name;
 }

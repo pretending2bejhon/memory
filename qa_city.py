@@ -50,6 +50,9 @@ def main():
         eng.wait(3)
         eng.screenshot(path("ride-archive.png"))
         report["archiveRide"] = evaluate("""() => ({active: window.__vc.state.ride,
+            tourActive: window.__vc.tour.active,
+            onBike: window.__vc.explore.active && window.__vc.explore.player.onBike,
+            view: window.__vc.explore.view,
             eye: window.__vc.camera.position.toArray(),
             clipped: window.__vc.pointBlocked(window.__vc.camera.position),
             fov: window.__vc.camera.fov})""")
@@ -62,11 +65,15 @@ def main():
         eng.wait(3)
         eng.screenshot(path("ride-downtown.png"))
         report["downtownRide"] = evaluate("""() => ({active: window.__vc.state.ride,
-            district: window.__vc.routes[window.__vc.state.ride]?.district,
+            tourActive: window.__vc.tour.active,
+            onBike: window.__vc.explore.active && window.__vc.explore.player.onBike,
+            view: window.__vc.explore.view,
+            district: window.__vc.roads.tour.legs[window.__vc.state.ride]?.from,
             clipped: window.__vc.pointBlocked(window.__vc.camera.position)})""")
         eng.page.keyboard.press("Escape")
         report["returnControls"] = evaluate("""() => ({enabled: window.__vc.controls.enabled,
-            ride: window.__vc.state.ride, fov: window.__vc.camera.fov})""")
+            ride: window.__vc.state.ride, fov: window.__vc.camera.fov,
+            tourActive: window.__vc.tour.active})""")
         evaluate("() => window.__vc.updateWeek(0)")
         eng.wait(.5)
         report["week0"] = evaluate("""() => ({visible: window.__vc.nodes.filter(n => n.state !== 'absent').length,
@@ -84,18 +91,28 @@ def main():
         eng.screenshot(path("mobile-ride.png"))
         report["mobile"] = evaluate("""() => ({width: innerWidth,
             overflow: document.documentElement.scrollWidth > innerWidth,
-            ride: window.__vc.state.ride})""")
+            ride: window.__vc.state.ride,
+            tourActive: window.__vc.tour.active,
+            onBike: window.__vc.explore.active && window.__vc.explore.player.onBike})""")
         report["errors"] = eng.errors
         checks = {
             "node census": report["buildings"] == 1246,
             "route collision clearance": report["failureCount"] == 0,
             "walking lane clearance": report["walkingFailureCount"] == 0,
-            "archive ride": report["archiveRide"]["active"] >= 0 and not report["archiveRide"]["clipped"] and report["archiveRide"]["fov"] == 62,
+            "archive ride": (report["archiveRide"]["active"] >= 0 and report["archiveRide"]["tourActive"]
+                             and report["archiveRide"]["onBike"] and report["archiveRide"]["view"] == 0
+                             and not report["archiveRide"]["clipped"]
+                             and 63.5 <= report["archiveRide"]["fov"] <= 78),
             "district focus": report["districtFocus"] == "working",
-            "downtown ride": report["downtownRide"]["district"] == "working" and not report["downtownRide"]["clipped"],
-            "overview restored": report["returnControls"] == {"enabled": True, "ride": -1, "fov": 39},
+            "downtown ride": (report["downtownRide"]["active"] >= 0 and report["downtownRide"]["tourActive"]
+                              and report["downtownRide"]["onBike"] and report["downtownRide"]["view"] == 0
+                              and report["downtownRide"]["district"] == "working"
+                              and not report["downtownRide"]["clipped"]),
+            "overview restored": report["returnControls"] == {"enabled": True, "ride": -1, "fov": 39, "tourActive": False},
             "timeline": report["week0"]["finite"] and report["week0"]["visible"] < report["week12"]["visible"],
-            "375 px mobile": report["mobile"]["width"] == 375 and not report["mobile"]["overflow"] and report["mobile"]["ride"] >= 0,
+            "375 px mobile": (report["mobile"]["width"] == 375 and not report["mobile"]["overflow"]
+                              and report["mobile"]["ride"] >= 0 and report["mobile"]["tourActive"]
+                              and report["mobile"]["onBike"]),
             "page and console errors": not report["errors"],
         }
         failures = [name for name, passed in checks.items() if not passed]

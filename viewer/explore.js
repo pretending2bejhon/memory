@@ -13,7 +13,7 @@ const explore = (() => {
   const wrapAngle = a => a - Math.round(a / TAU) * TAU;
   const damp = (k, dt) => 1 - Math.exp(-k * dt);
   const V3 = THREE.Vector3;
-  const api = {active: false, frozen: false, pilot: null, tourHook: null};
+  const api = {active: false, frozen: false, pilot: null, tourHook: null, tourDriver: null, tourExit: null};
 
   // ------------------------------------------------------------------ ground (C8.4)
   // Walkable surfaces come from the design data, never from meshes: plateau tops, ring roads, avenues and
@@ -419,7 +419,8 @@ const explore = (() => {
     while (trail.n && trail.clock - trail.t[(trail.head - trail.n + TRAIL_MAX) % TRAIL_MAX] > TRAIL_SECONDS) trail.n--;
     const moving = riding && Math.abs(bike.speed) > .15;
     if (moving && trail.clock - trail.last >= every) {
-      const c = districtColor[zoneAt(rear.x, rear.z, bike.y).district] || districtColor.core, k = trail.head;
+      const district = zoneAt(rear.x, rear.z, bike.y).district;
+      const c = districtColor[district] || districtColor.core, k = trail.head;
       trail.x[k] = rear.x; trail.y[k] = rear.y; trail.z[k] = rear.z; trail.r[k] = c[0]; trail.g[k] = c[1]; trail.b[k] = c[2]; trail.t[k] = trail.clock;
       trail.head = (k + 1) % TRAIL_MAX; trail.n = Math.min(TRAIL_MAX, trail.n + 1); trail.last = trail.clock;
     }
@@ -492,7 +493,7 @@ const explore = (() => {
       case 'KeyF': leave(); break;
       case 'KeyP': photo.active ? photo.leave() : photo.enter(); break;
       case 'Tab': if (!photo.active) { hud.toggleMap(); if (hud.mapOpen && document.pointerLockElement) document.exitPointerLock(); } break;
-      case 'KeyE': if (!photo.active) toggleBike(); break;
+      case 'KeyE': if (!photo.active && !api.tourDriver) toggleBike(); break;
       case 'KeyV': if (!photo.active) view = (view + 1) % 2; break;
       case 'KeyO': if (!photo.active) shuffleOutfit(); break;
       case 'KeyR': if (!photo.active) startTour(); break;
@@ -702,7 +703,7 @@ const explore = (() => {
     b.x = P.x; b.y = P.y; b.z = P.z; P.yaw = b.heading; P.speed = v; P.vx = dx / Math.max(dt, 1e-6); P.vz = dz / Math.max(dt, 1e-6);
   }
   function toggleBike() {
-    if (!api.active || travel.active) return;
+    if (!api.active || travel.active || api.tourDriver) return;
     if (P.onBike) {
       P.onBike = false; bike.derezDir = -1; bike.boosting = false; P.vx = P.vz = 0;
       // Step off to the right if there is ground there.
@@ -793,7 +794,7 @@ const explore = (() => {
       // It stays 0.1 above your feet and above the surface under it nearest your level (on an overpass the
       // deck, under one the road), whichever is higher.
       if (!debug.noCamFloor) {
-        const g = surfaceAt(eye.x, eye.z, P.y + .3), floor = (g !== null && g > P.y ? g : P.y) + .1;
+        const g = surfaceAt(eye.x, eye.z, P.y + .3), floor = (g !== null && g > P.y ? g : P.y) + (P.onBike ? .32 : .1);
         if (eye.y < floor) eye.y = floor;
       }
     }
@@ -961,6 +962,7 @@ const explore = (() => {
   // `reentering` is set when a new #explore link moves you: the hash that asked for it stays in the address.
   function leave(reentering) {
     if (!api.active) return;
+    if (api.tourDriver) { api.tourExit(); return; }
     photo.leave();
     if (document.pointerLockElement) document.exitPointerLock();
     travel.active = false; travel.dim = 0; look.shrink = 1; columnT = -1; column.visible = false;
@@ -1004,13 +1006,14 @@ const explore = (() => {
     pollPad(); gather(dt);
     if (photo.active) { photo.update(dt); return; }
     updateTravel(dt);
-    if (!travel.active || travel.t < .5 || travel.t > .55) { if (P.onBike) updateBike(dt); else updateFoot(dt); }
+    if (api.tourDriver) api.tourDriver(dt, api);
+    else if (!travel.active || travel.t < .5 || travel.t > .55) { if (P.onBike) updateBike(dt); else updateFoot(dt); }
     // Never inside a footprint, even when the timeline or a teleport would put us there.
     if (!debug.noCollide && insideFootprint(P.x, P.z, P.y, 0)) { at.x = P.x; at.z = P.z; pushOut(P.y, FOOT.radius); P.x = at.x; P.z = at.z; }
     updatePose(dt, now);
     updateBikeMesh(dt); trailUpdate(dt, P.onBike && bike.present); updateColumn(dt);
     updateCamera(dt);
-    followMusic(dt);
+    if (!api.tourDriver) followMusic(dt);
     // The world notices you (C8.10): crowd.js turns heads and cheers from this; nature.js (V7) reads the same
     // object as explore.notice for dogs that follow the bike for up to 2 s and pigeons that scatter within 1.5.
     const n = crowd.notice; n.active = true; n.x = P.x; n.z = P.z; n.speed = P.onBike ? Math.abs(bike.speed) : P.speed; n.onBike = P.onBike;
@@ -1028,6 +1031,8 @@ const explore = (() => {
   body.exploring .mark, body.exploring .chips, body.exploring .city-help, body.exploring .city-meta, body.exploring #labels, body.exploring #ride-badge, body.exploring #tip { display:none !important; }
   body.exploring .bar { top:calc(16px + env(safe-area-inset-top,0px)); bottom:auto; left:auto; right:16px; transform:none; width:auto; padding:7px; gap:7px; z-index:7; }
   body.exploring .bar .scrub, body.exploring .bar #play, body.exploring .bar #ride, body.exploring .bar .menu { display:none; }
+  body.exploring.riding .bar #ride { display:inline-flex; }
+  body.exploring.riding #ride-badge { display:flex !important; }
   body.photo > :not(#stage):not(#ex-photo):not(#ex-touch):not(script):not(style) { display:none !important; }
   body.photo #ex-buttons { display:none; }
   #ex-photo { position:fixed; left:50%; bottom:calc(20px + env(safe-area-inset-bottom,0px)); transform:translateX(-50%); display:flex; gap:10px; align-items:center; padding:8px 10px 8px 14px;
@@ -1042,7 +1047,7 @@ const explore = (() => {
     text-transform:uppercase; touch-action:none; -webkit-user-select:none; user-select:none; }
   #ex-buttons button.on { background:var(--signal); color:var(--night); }
   #ex-buttons button[data-a="map"] { grid-column:span 2; height:40px; }
-  @media (max-width:720px) { body:not(.exploring) .bar { gap:4px; } body:not(.exploring) .bar .btn { padding:11px 5px; } #ride::before { display:none; } }
+  @media (max-width:720px) { body:not(.exploring) .bar { gap:4px; } body:not(.exploring) .bar .btn { padding:11px 5px; } #ride::before { display:none; } body.exploring.riding #ride-badge { display:none !important; } }
   @media (prefers-reduced-motion:reduce) { #ex-photo { transition:none; } }`;
   document.head.appendChild(style);
 
