@@ -14,15 +14,18 @@ import time
 from pathlib import Path
 
 from qa_browser import Engine
+from qa_explore import V6_CHECK_NAMES, V6_S2_SPOT, V6_S3_SETUP, verify_explore
 
 ROOT = Path(__file__).resolve().parent
+# Run B is certified in implementation order: V6, V7, V5, V8.
+PHASE_ORDER = {**{f"v{i}": i for i in range(5)}, "v6": 5, "v7": 6, "v5": 7, "v8": 8}
 SCENES = (
     {"id": "S1", "scene": "overview", "fromPhase": 0, "name": "Overview at week 12"},
     {"id": "S2", "scene": "downtown_stage", "fromPhase": 2,
      "name": "Downtown stage, full crowd, fixed street camera"},
     {"id": "S3", "scene": "archive_ride", "fromPhase": 0,
      "name": "Existing Ride along on Lantern avenue, week 12"},
-    {"id": "S4", "scene": "reef_shore", "fromPhase": 7, "name": "Reef shore, Run B V7"},
+    {"id": "S4", "scene": "reef_shore", "fromPhase": 6, "name": "Reef shore, Run B V7"},
     {"id": "S5", "scene": "overview_transition", "fromPhase": 0,
      "name": "60 seconds through Downtown focus to Works focus"},
 )
@@ -236,12 +239,14 @@ def perf_pass(value):
 
 
 def set_mode(engine, mode):
-    engine.evaluate("""() => {const v=window.__vc;if(v.state.ride>=0)v.stopRide();
+    engine.evaluate("""() => {const v=window.__vc;if(v.explore?.active)v.explore.leave();if(v.state.ride>=0)v.stopRide();
       document.getElementById('reset-cam').click();v.setIsolate(null);}""")
     if mode == "focus":
         engine.evaluate("() => {window.__vc.setIsolate('working');window.__vc.flyTo('working');}")
     elif mode == "ride":
         engine.evaluate("() => {window.__vc.setIsolate('episodic');window.__vc.startRide();}")
+    elif mode == "explore":
+        engine.evaluate("() => window.__vc.explore.openHash('#explore/downtown')")
 
 
 def wait_audio(engine):
@@ -254,14 +259,19 @@ def settle_room(engine):
       a.ctx.currentTime>=a.transition.end;}""", 35)
 
 
-def measure_scene(engine, scene, path, baseline):
+def measure_scene(engine, scene, path, baseline, phase=0):
     key = scene["id"]
-    print("Measuring " + key + ": " + scene["name"] + ", 60 seconds, sound on", flush=True)
+    name = ("Downtown stage, on-foot avatar" if key == "S2" and phase >= 5 else
+            "Bike at boost on the Memory Causeway" if key == "S3" and phase >= 5 else scene["name"])
+    print("Measuring " + key + ": " + name + ", 60 seconds, sound on", flush=True)
     engine.evaluate("() => window.__vc.updateWeek(12)")
-    set_mode(engine, "ride" if key == "S3" else "overview")
+    set_mode(engine, "ride" if key == "S3" and phase < 5 else "overview")
     if key == "S5":
         engine.evaluate("() => window.__vc.setIsolate('working')")
-    if key == "S2":
+    if key == "S2" and phase >= 5:
+        engine.evaluate("() => window.__vc.explore.openHash('#explore/downtown')")
+        engine.evaluate(V6_S2_SPOT)
+    elif key == "S2":
         engine.evaluate("""() => {
           const v=window.__vc, s=v.venues?.stages?.find(s=>s.district==='working');
           if(!s)throw new Error('Downtown stage unavailable');
@@ -269,23 +279,38 @@ def measure_scene(engine, scene, path, baseline):
           v.camera.position.set(x,up+.5,z+3);v.controls.target.set(x,up+.5,z);
           v.controls.update();
         }""")
+    if key == "S3" and phase >= 5:
+        setup = engine.evaluate(V6_S3_SETUP, False)
+        if not setup["ok"] or not setup["onBike"]:
+            raise RuntimeError("S3 bike could not enter the Memory Causeway")
     settle_room(engine)
     engine.wait(12)
+    if key == "S3" and phase >= 5:
+        wait_probe(engine, """() => {const e=window.__vc.explore,p=e.player;
+          return e.bike.boosting&&e.surfaces.probe(p.x,p.z,p.y)&&
+            e.surfaces.hit.kind===e.surfaces.K.bridge&&e.surfaces.hit.owner===0;}""", 20)
     engine.screenshot(path("world-" + key.lower() + ".png"))
+    if key == "S3" and phase >= 5:
+        engine.evaluate("() => {const q=window.__qaS3;q.boostDeckMs=0;q.deckMs=0;q.laps=0;}")
     engine.evaluate(FRAME_TRACE)
     if key == "S5":
         engine.wait(2)
         engine.evaluate("() => window.__vc.setIsolate('procedural')")
     wait_probe(engine, "() => window.__qaWorldFrames.done", 75)
     trace = engine.evaluate("() => window.__qaWorldFrames")
+    s3 = engine.evaluate("() => window.__qaS3") if key == "S3" and phase >= 5 else None
+    if key in ("S2", "S3") and phase >= 5:
+        engine.evaluate("() => {const e=window.__vc.explore;e.pilot=null;if(e.active)e.leave();delete window.__qaS3;}")
     path("world-" + key.lower() + "-frames.json").write_text(json.dumps(trace), encoding="utf-8")
     metrics = summarize_frames(trace)
     tiers = metrics["tiers"]
     tier_pass = bool(tiers) and all(tier is not None and tier >= 2 for tier in tiers)
-    return {**scene, "available": True, "required": True, "measured": True,
+    boost_pass = (s3["boostDeckMs"] >= 2000 and s3["deckMs"] >= 4000 and s3["laps"] >= 1) if s3 else None
+    return {**scene, "name": name, "available": True, "required": True, "measured": True,
             "tier": "legacy desktop, no tier API" if baseline else metrics["settledTier"],
             "metrics": metrics, "numericBudgetPass": perf_pass(metrics),
-            "settledTierPass": tier_pass, "passed": perf_pass(metrics) and tier_pass}
+            "settledTierPass": tier_pass, "s3Telemetry": s3, "boostPass": boost_pass,
+            "passed": perf_pass(metrics) and tier_pass and (boost_pass is not False)}
 
 
 def measure_heap(engine, path):
@@ -338,8 +363,13 @@ def measure_flash(engine, mode, setting, path, baseline=False):
     settle_room(engine)
     engine.wait(2)
     engine.evaluate(LUMINANCE_TRACE)
-    engine.evaluate("""() => {const a=window.__vc.audio;
-      a.setRoom(a.room==='procedural'?'working':'procedural');}""")
+    if mode == "explore":
+        # In explore the room follows position, so move to the Works stage.
+        engine.evaluate("""() => {const e=window.__vc.explore;
+          e.fastTravel(e.design.stages.findIndex(s=>s.district==='procedural'));}""")
+    else:
+        engine.evaluate("""() => {const a=window.__vc.audio;
+          a.setRoom(a.room==='procedural'?'working':'procedural');}""")
     wait_probe(engine, "() => window.__qaWorldFlash.done", 45)
     trace = engine.evaluate("""() => {
       const q=window.__qaWorldFlash;
@@ -2082,7 +2112,10 @@ def self_test():
               "V0 scenes": [s["id"] for s in SCENES if s["fromPhase"] <= 0] == ["S1", "S3", "S5"],
               "V2 adds stage only": [s["id"] for s in SCENES if s["fromPhase"] <= 2] == ["S1", "S2", "S3", "S5"],
               "V3 scene set unchanged": [s["id"] for s in SCENES if s["fromPhase"] <= 3] == ["S1", "S2", "S3", "S5"],
-              "V4 scene set unchanged": [s["id"] for s in SCENES if s["fromPhase"] <= 4] == ["S1", "S2", "S3", "S5"]}
+              "V4 scene set unchanged": [s["id"] for s in SCENES if s["fromPhase"] <= 4] == ["S1", "S2", "S3", "S5"],
+              "Run B implementation order": [PHASE_ORDER[p] for p in ("v6", "v7", "v5", "v8")] == [5, 6, 7, 8],
+              "V6 scene set unchanged": [s["id"] for s in SCENES if s["fromPhase"] <= 5] == ["S1", "S2", "S3", "S5"],
+              "V7 adds shore scene": [s["id"] for s in SCENES if s["fromPhase"] <= 6] == ["S1", "S2", "S3", "S4", "S5"]}
     print(json.dumps(checks, indent=2))
     return int(not all(checks.values()))
 
@@ -2091,7 +2124,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--url", default="http://127.0.0.1:8765/viewer/")
     parser.add_argument("--prefix", default="world")
-    parser.add_argument("--phase", choices=("v0", "v1", "v2", "v3", "v4"), default="v0")
+    parser.add_argument("--phase", choices=tuple(PHASE_ORDER), default="v0")
     parser.add_argument("--baseline", action="store_true", help="Measure legacy page; absent V0 capabilities fail")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
@@ -2099,7 +2132,7 @@ def main():
         return self_test()
     if not args.prefix or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" for c in args.prefix):
         parser.error("--prefix must contain only letters, digits, hyphens or underscores")
-    phase = int(args.phase[1])
+    phase = PHASE_ORDER[args.phase]
     output = ROOT / "renders" / "qa"
     output.mkdir(parents=True, exist_ok=True)
     path = lambda suffix: output / (args.prefix + "-" + suffix)
@@ -2133,10 +2166,12 @@ def main():
                     report["performance"].append({**scene, "available": False, "required": False,
                                                    "measured": False, "status": "not present in this phase"})
                     continue
-                item = measure_scene(eng, scene, path, args.baseline)
+                item = measure_scene(eng, scene, path, args.baseline, phase)
                 report["performance"].append(item)
                 checks[scene["id"] + " numeric budgets"] = item["numericBudgetPass"]
                 checks[scene["id"] + " settled tier at least 2"] = item["settledTierPass"]
+                if scene["id"] == "S3" and phase >= 5:
+                    checks["S3 bike boosted on the Memory Causeway"] = item["boostPass"]
             report["heapSession"] = measure_heap(eng, path)
             checks["five-minute session heap growth at most 40 MB"] = report["heapSession"]["passed"]
             report["flash"] = []
@@ -2145,12 +2180,12 @@ def main():
                 checks["legacy overview observed area flash trace"] = report["flash"][0]["measuredTracePass"]
                 checks["all existing modes and Lights settings flash gate"] = False
             else:
-                for mode in ("overview", "focus", "ride"):
+                for mode in ("overview", "focus", "ride") + (("explore",) if phase >= 5 else ()):
                     for setting in ("Full", "Soft", "Calm"):
                         item = measure_flash(eng, mode, setting, path)
                         report["flash"].append(item)
                         checks["area flash " + mode + " " + setting] = item["measuredTracePass"]
-                checks["all existing modes and Lights settings flash gate"] = len(report["flash"]) == 9 and all(item["measuredTracePass"] for item in report["flash"])
+                checks["all existing modes and Lights settings flash gate"] = len(report["flash"]) == (12 if phase >= 5 else 9) and all(item["measuredTracePass"] for item in report["flash"])
                 report["foundations"], foundation_checks = measure_foundations(eng, path)
                 checks.update(foundation_checks)
                 if phase >= 1:
@@ -2226,6 +2261,9 @@ def main():
                 checks["375 px phone starts Tier 1 with pixel ratio 1"] = (
                     phone["width"] == 375 and not phone["overflow"] and phone["initialTier"] == 1 and
                     phone["currentTier"] == 1 and phone["pixelRatio"] == 1)
+                if phase >= 5:
+                    report["explore"], explore_checks = verify_explore(eng, args.url)
+                    checks.update(explore_checks)
             report["errors"] = list(eng.errors)
     except Exception as error:
         report["errors"].append(str(error))
@@ -2256,6 +2294,10 @@ def main():
             checks.setdefault(name, False)
         if not any(name.startswith("design: ") for name in checks):
             checks["design: qa_design gates ran"] = False
+    if phase >= 5:
+        checks.setdefault("S3 bike boosted on the Memory Causeway", False)
+        for name in V6_CHECK_NAMES:
+            checks.setdefault(name, False)
     page = ROOT / "dist" / "index.html"
     report["publicBytes"] = page.stat().st_size if page.exists() else None
     checks["public page at most 900 KB"] = report["publicBytes"] is not None and report["publicBytes"] <= 900_000

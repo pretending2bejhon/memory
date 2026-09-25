@@ -175,7 +175,13 @@ const extraPeople=(typeof venueExtras!=='undefined'?venueExtras:[]).map(e=>{cons
   if(person.pose==='dance'&&!person.style){const room=STYLE_BY_ROOM[person.district]||'bounce';person.style=crowdRnd()<.7?room:pickFrom(crowdRnd,STYLE_ALTS[room]);}
   people.push(person);return person;});
 
-const PEOPLE=people.length;
+// C3.8: the visitor's avatar is the last person. explore.js writes its matrices through avatar.writer and
+// re-dresses it with crowd.dressAvatar; it holds one slot in every accessory mesh so O can shuffle outfits,
+// and a second strips slot for the stripe on its back, the side the over-the-shoulder camera sees.
+const avatar={kind:4,district:'core',x:0,y:0,z:0,yaw:0,offset:0,energy:1,seed:.5,scale:1,style:'walk',hidden:true,writer:null,
+  outfit:{archetype:5,skin:'#9d6947',hair:'#1b130e',hairStyle:'short',top:'#11807d',sleeve:'#11807d',bottom:'#16202b',leg:'#16202b',acc:{strips:'#6be7e1'}}};
+people.push(avatar);
+const PEOPLE=people.length,AVATAR=PEOPLE-1;
 const personParts={},accessoryMeshes={};
 const skinColor=new THREE.Color();
 function partMesh(geometry,material,count){
@@ -189,6 +195,8 @@ for(const [name,geometry] of Object.entries(PART_GEOMETRY))personParts[name]=par
 const wearers={};
 for(const name of Object.keys(ACCESSORY_GEOMETRY))wearers[name]=[];
 people.forEach((p,i)=>{p.acc=[];const o=p.outfit;
+  if(p.kind===4){p.accSlots={};for(const name of Object.keys(wearers)){wearers[name].push(i);p.accSlots[name]=wearers[name].length-1;}
+    wearers.strips.push(i);p.backSlot=wearers.strips.length-1;return;}
   const want=[];if(o.hairStyle==='long')want.push(['longHair',o.hair]);
   for(const [name,color] of Object.entries(o.acc))want.push([name,color]);
   for(const [name,color] of want){if(!wearers[name])continue;wearers[name].push(i);p.acc.push({name,slot:wearers[name].length-1,color});}
@@ -197,15 +205,17 @@ for(const [name,list] of Object.entries(wearers)){
   const count=Math.max(1,name==='glow'?list.length*2:list.length);
   accessoryMeshes[name]=partMesh(ACCESSORY_GEOMETRY[name],EMISSIVE.has(name)?glowMat:bodyMat,count);
 }
-const tintOf=p=>districtLight(p.district);
-people.forEach((p,i)=>{
-  const o=p.outfit,tint=tintOf(p),lit=p.kind===1||p.kind===2?1:p.kind===3?.45:.22;
+const AVATAR_TINT=col(hex('#6be7e1'));
+const tintOf=p=>p.kind===4?AVATAR_TINT:districtLight(p.district);
+function paintPerson(p,i){
+  const o=p.outfit,tint=tintOf(p),lit=p.kind===1||p.kind===2?1:p.kind===3?.45:p.kind===4?.7:.22;
   const paint=(name,color)=>{const m=personParts[name];m.setColorAt(i,skinColor.set(color));m.geometry.attributes.aTint.setXYZ(i,tint.r,tint.g,tint.b);m.geometry.attributes.aLit.setX(i,lit);};
   paint('torso',o.top);paint('hips',o.bottom);paint('legA',o.leg);paint('legB',o.leg);paint('armA',o.sleeve);paint('armB',o.sleeve);
   paint('head',o.skin);paint('hair',o.hairStyle==='none'?o.skin:o.hair);
   for(const a of p.acc){const mesh=accessoryMeshes[a.name],slots=a.name==='glow'?[a.slot*2,a.slot*2+1]:[a.slot];
     for(const k of slots){mesh.setColorAt(k,skinColor.set(a.color));mesh.geometry.attributes.aTint.setXYZ(k,tint.r,tint.g,tint.b);mesh.geometry.attributes.aLit.setX(k,lit);}}
-});
+}
+people.forEach(paintPerson);
 const personMeshes=[...Object.values(personParts),...Object.values(accessoryMeshes)];
 const arrays={};for(const [name,mesh] of Object.entries(personParts))arrays[name]=mesh.instanceMatrix.array;
 for(const mesh of personMeshes){if(mesh.instanceColor)mesh.instanceColor.needsUpdate=true;mesh.geometry.attributes.aTint.needsUpdate=true;mesh.geometry.attributes.aLit.needsUpdate=true;}
@@ -216,7 +226,7 @@ for(const mesh of personMeshes){if(mesh.instanceColor)mesh.instanceColor.needsUp
 // (position, scale, the feet's and the upper body's yaw, the three heights, the leg stretch) and each part
 // is chosen by an integer kind, so no call passes a number that would be boxed (C13.4). A part's matrix
 // turns it by a about x and b about z at its joint (jx, jy, jz), scales it and turns the whole by the yaw.
-const WP=new Float64Array(11),WP_X=0,WP_Z=1,WP_S=2,WP_CY=3,WP_SY=4,WP_CU=5,WP_SU=6,WP_LEG=7,WP_BODY=8,WP_GROUND=9,WP_LEGS=10;
+const WP=new Float64Array(13),WP_X=0,WP_Z=1,WP_S=2,WP_CY=3,WP_SY=4,WP_CU=5,WP_SU=6,WP_LEG=7,WP_BODY=8,WP_GROUND=9,WP_LEGS=10,WP_CH=11,WP_SH=12;
 const PART_LEG_A=0,PART_LEG_B=1,PART_HIPS=2,PART_TORSO=3,PART_ARM_A=4,PART_ARM_B=5,PART_HEAD=6,PART_HIP_ACC=7,PART_GROUND=8;
 function writePose(array,index,kind){
   let py=WP[WP_BODY],cy=WP[WP_CU],sy=WP[WP_SU],jx=0,jy=0,a=0,b=0,syy=1;
@@ -225,7 +235,7 @@ function writePose(array,index,kind){
   else if(kind===PART_TORSO){jy=J.torsoY;a=pose.lean;}
   else if(kind===PART_ARM_A){jx=J.shoulderX;jy=J.shoulderY;a=pose.aA;b=pose.bA;}
   else if(kind===PART_ARM_B){jx=-J.shoulderX;jy=J.shoulderY;a=pose.aB;b=pose.bB;}
-  else if(kind===PART_HEAD){jy=J.neckY;a=pose.nod;}
+  else if(kind===PART_HEAD){cy=WP[WP_CH];sy=WP[WP_SH];jy=J.neckY;a=pose.nod;}
   else if(kind===PART_HIP_ACC){cy=WP[WP_CY];sy=WP[WP_SY];jy=J.hipY+.03;}
   else{py=WP[WP_GROUND];cy=WP[WP_CY];sy=WP[WP_SY];}
   const px=WP[WP_X],pz=WP[WP_Z],s=WP[WP_S],jz=0,sx=1,sz=1;
@@ -239,6 +249,8 @@ function writePose(array,index,kind){
 }
 function hideIndex(array,index){const o=index*16;for(let k=0;k<16;k++)array[o+k]=0;}
 const pose={dip:0,jump:0,sway:0,twist:0,lean:0,nod:0,aA:0,bA:0,aB:0,bB:0,lA:0,lB:0};
+const crowdDebug={silentDanceScale:.5};
+function dancerEnergy(p){return p.energy*(cityAudio.enabled?1:crowdDebug.silentDanceScale);}
 const ROBOT=[[-1.57,0,-1.57,0,0],[-1.57,0,0,-1.3,.35],[0,1.45,0,-1.45,0],[-3.0,-.1,0,-.2,-.3],[-1.57,1.2,-1.57,-1.2,0],[-.2,.25,-2.4,-.3,.3]];
 // The pose writers read their numbers from POSE_IN (0 beat time, 1 energy, 2 seed), so a call boxes no double.
 const POSE_IN=new Float64Array(3);
@@ -359,6 +371,7 @@ function updatePeople(dt,now){
   const tr=beat.transition,stage=tr.active?tr.stage:'groove';
   let posed=0,culled=0,lod=0;
   camWorld.copy(camera.position);
+  const noticing=notice.active&&live,cheering=noticing&&notice.speed>4;
   for(let i=0;i<PEOPLE;i++){
     const p=people[i],visible=isVisible(i,p);
     if(!visible){
@@ -368,6 +381,9 @@ function updatePeople(dt,now){
       inViewBefore[i]=0;
       continue;
     }
+    if(p.writer){shown[i]=1;p.writer(p,b);partDirty[i>>6]=1;
+      for(let k=0;k<p.acc.length;k++){const a=p.acc[k];if(a.pair){a.dirty[(a.slot*2)>>6]=1;a.dirty[(a.slot*2+1)>>6]=1;}else a.dirty[a.slot>>6]=1;}
+      continue;}
     // Walkers keep walking every frame. Nobody outside the frustum is posed (their pose resumes the
     // frame they come into view); far people refresh their pose less often, a chunk at a time.
     let px,py,pz,yaw,far;
@@ -399,7 +415,7 @@ function updatePeople(dt,now){
       // Seated patrons raise the bottle for one bar on the drop.
       if(p.pose==='sit'){const since=b.totalBeats-dropBeat;if(since>=0&&since<4){pose.aA=-2.75;pose.bA=.12;pose.nod=-.15;}}}
     else{
-      let e=p.energy,tt=t;
+      let e=p.kind===1||(p.kind===3&&p.pose==='dance')?dancerEnergy(p):p.energy,tt=t;
       if(stage==='bridge')e*=.5;
       if(stage==='cut'&&freezeBeat>=0)tt=freezeBeat+p.offset;
       POSE_IN[0]=tt;POSE_IN[1]=e;POSE_IN[2]=p.seed;stylePose(p.style,pose);
@@ -411,10 +427,17 @@ function updatePeople(dt,now){
         if(crowdMember){pose.aA=-2.8;pose.bA=-.3;pose.aB=-2.8;pose.bB=.3;}else pose.aB=-2.9;}
       if(p.style==='handsup'&&b.totalBeats<stabUntil)pose.jump=Math.max(pose.jump,.03);
     }
-    const s=p.scale,cy=Math.cos(yaw),sy=Math.sin(yaw),cu=Math.cos(yaw+pose.twist),su=Math.sin(yaw+pose.twist);
+    // C8.10: people within 1.5 of the visitor turn their heads; dancers cheer for a beat as a fast bike passes.
+    let look=0;
+    if(noticing&&p.kind!==2){const dx=notice.x-px,dz=notice.z-pz,d2=dx*dx+dz*dz;
+      if(d2<2.25){const a=Math.atan2(dx,dz)-yaw-pose.twist;look=Math.max(-1.1,Math.min(1.1,a-Math.round(a/TAU)*TAU));}
+      if(cheering&&(p.kind===1||p.pose==='dance')&&d2<4&&!(b.totalBeats-(p.cheerAt??-9)<4))p.cheerAt=b.totalBeats;
+      const since=b.totalBeats-(p.cheerAt??-9);
+      if(since>=0&&since<1){pose.aA=-2.8;pose.aB=-2.8;pose.bA=-.35;pose.bB=.35;pose.jump=Math.max(pose.jump,.04*Math.sin(Math.PI*since));}}
+    const s=p.scale,cy=Math.cos(yaw),sy=Math.sin(yaw),cu=Math.cos(yaw+pose.twist),su=Math.sin(yaw+pose.twist),ch=Math.cos(yaw+pose.twist+look),sh=Math.sin(yaw+pose.twist+look);
     px+=pose.sway*cy;pz-=pose.sway*sy;
     const lift=pose.jump,body=py+lift-pose.dip*s,legScale=(J.hipY-pose.dip)/J.hipY;
-    WP[WP_X]=px;WP[WP_Z]=pz;WP[WP_S]=s;WP[WP_CY]=cy;WP[WP_SY]=sy;WP[WP_CU]=cu;WP[WP_SU]=su;WP[WP_LEG]=py+lift;WP[WP_BODY]=body;WP[WP_GROUND]=py;WP[WP_LEGS]=legScale;
+    WP[WP_X]=px;WP[WP_Z]=pz;WP[WP_S]=s;WP[WP_CY]=cy;WP[WP_SY]=sy;WP[WP_CU]=cu;WP[WP_SU]=su;WP[WP_LEG]=py+lift;WP[WP_BODY]=body;WP[WP_GROUND]=py;WP[WP_LEGS]=legScale;WP[WP_CH]=ch;WP[WP_SH]=sh;
     writePose(arrays.legA,i,PART_LEG_A);
     writePose(arrays.legB,i,PART_LEG_B);
     writePose(arrays.hips,i,PART_HIPS);
@@ -438,11 +461,55 @@ function updatePeople(dt,now){
 }
 for(const mesh of personMeshes)for(let i=0;i<mesh.count;i++)hideIndex(mesh.instanceMatrix.array,i);
 
+// C3.8, C8.10: the avatar's outfit and the visitor's position, both written by explore.js.
+const notice={active:false,x:0,z:0,speed:0,onBike:false};
+function dressAvatar(outfit){
+  for(const name in avatar.accSlots){const mesh=accessoryMeshes[name],k=avatar.accSlots[name],arr=mesh.instanceMatrix.array;
+    if(name==='glow'){hideIndex(arr,k*2);hideIndex(arr,k*2+1);accessoryDirty[name][(k*2)>>6]=1;accessoryDirty[name][(k*2+1)>>6]=1;}
+    else{hideIndex(arr,k);accessoryDirty[name][k>>6]=1;}}
+  hideIndex(accessoryMeshes.strips.instanceMatrix.array,avatar.backSlot);
+  accessoryDirty.strips[avatar.backSlot>>6]=1;
+  avatar.outfit=outfit;avatar.acc=[];
+  if(outfit.hairStyle==='long')avatar.acc.push({name:'longHair',slot:avatar.accSlots.longHair,color:outfit.hair});
+  for(const name in outfit.acc)if(avatar.accSlots[name]!==undefined)avatar.acc.push({name,slot:avatar.accSlots[name],color:outfit.acc[name]});
+  // The stripe is worn on the back too (explore.js turns this slot half round), so you can find yourself.
+  if(outfit.acc.strips)avatar.acc.push({name:'strips',slot:avatar.backSlot,color:outfit.acc.strips,back:true});
+  for(const a of avatar.acc){
+    a.array=accessoryMeshes[a.name].instanceMatrix.array;a.dirty=accessoryDirty[a.name];
+    const at=ACCESSORY_ATTACH[a.name];a.pair=at==='arms';
+    a.part=at==='head'?PART_HEAD:at==='torso'?PART_TORSO:at==='hips'?PART_HIP_ACC:at==='armA'?PART_ARM_A:PART_GROUND;
+    if(a.pair){a.dirty[(a.slot*2)>>6]=1;a.dirty[(a.slot*2+1)>>6]=1;}else a.dirty[a.slot>>6]=1;
+  }
+  paintPerson(avatar,AVATAR);
+  for(const mesh of personMeshes){if(mesh.instanceColor)mesh.instanceColor.needsUpdate=true;mesh.geometry.attributes.aTint.needsUpdate=true;mesh.geometry.attributes.aLit.needsUpdate=true;}
+}
+dressAvatar(avatar.outfit);
+// Photo mode freezes updatePeople, so explore.js shows (writes once) or hides the avatar through this.
+function flushAvatarMatrices(){
+  partDirty[AVATAR>>6]=1;
+  for(const a of avatar.acc){if(a.pair){a.dirty[(a.slot*2)>>6]=1;a.dirty[(a.slot*2+1)>>6]=1;}else a.dirty[a.slot>>6]=1;}
+  const n=collectRanges(partDirty,PEOPLE);
+  for(let k=0;k<partAttributes.length;k++)applyRanges(partAttributes[k],n);
+  for(let k=0;k<accessoryList.length;k++){const x=accessoryList[k];applyRanges(x.attribute,collectRanges(x.dirty,x.count));}
+}
+function showAvatar(on){
+  avatar.hidden=!on;
+  if(on){shown[AVATAR]=1;avatar.writer(avatar,beat.now());}
+  else if(shown[AVATAR]){shown[AVATAR]=0;for(const name in arrays)hideIndex(arrays[name],AVATAR);
+    for(const a of avatar.acc){const arr=accessoryMeshes[a.name].instanceMatrix.array;if(a.name==='glow'){hideIndex(arr,a.slot*2);hideIndex(arr,a.slot*2+1);}else hideIndex(arr,a.slot);}}
+  flushAvatarMatrices();
+}
+
 function census(){
   let walkers=0,dancers=0,djCount=0,others=0;
-  people.forEach((p,i)=>{if(!isVisible(i,p))return;if(p.kind===0)walkers++;else if(p.kind===1)dancers++;else if(p.kind===2)djCount++;else others++;});
+  people.forEach((p,i)=>{if(!isVisible(i,p))return;if(p.kind===0)walkers++;else if(p.kind===1)dancers++;else if(p.kind===2)djCount++;else if(p.kind===3)others++;});
   return {walkers,dancers,djs:djCount,others,perStage:stages.map((s,i)=>({district:s.district,visible:crowdState.stageVisible[i],capacity:s.capacity,target:crowdState.stageTarget[i]}))};
 }
-const crowd={people,parts:personParts,accessories:accessoryMeshes,stages,stageSlots,djs,extras:extraPeople,caps:CROWD_CAPS,riderReserve,state:crowdState,census,
+const crowd={avatar,avatarIndex:AVATAR,dressAvatar,showAvatar,notice,dress,debug:crowdDebug,dancerEnergy,
+  stylePose(style,t,energy,seed,out){POSE_IN[0]=t;POSE_IN[1]=energy;POSE_IN[2]=seed;stylePose(style,out);},
+  walkPose(t,relaxed,out){POSE_IN[0]=t;walkPose(relaxed,out);},
+  stillPose(kind,t,out){POSE_IN[0]=t;stillPose(kind,out);},
+  joints:J,attach:ACCESSORY_ATTACH,styleByRoom:STYLE_BY_ROOM,
+  people,parts:personParts,accessories:accessoryMeshes,stages,stageSlots,djs,extras:extraPeople,caps:CROWD_CAPS,riderReserve,state:crowdState,census,
   setTimeline(stats){lastStats=stats;setTimeline(stats);},applyTier:applyCrowdTier,isVisible,
   get count(){return census();}};

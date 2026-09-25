@@ -324,10 +324,11 @@ for(let i=0;i<rainCount;i++)rainSeeds.push([rainRnd()*46-23,rainRnd()*24,rainRnd
 const rainGeo=new THREE.BufferGeometry();rainGeo.setAttribute('position',new THREE.BufferAttribute(rainPositions,3).setUsage(THREE.DynamicDrawUsage));
 const rain=new THREE.LineSegments(rainGeo,new THREE.LineBasicMaterial({color:col(hex('#7fb2c8')),transparent:true,opacity:.18,depthWrite:false}));rain.frustumCulled=false;rain.visible=!reduced;scene.add(rain);
 function updateAtmosphere(now) {
-  horizon.visible=state.ride>=0;
-  rain.material.opacity=state.ride>=0?.2:.045;
+  const inside=state.ride>=0||state.explore;
+  horizon.visible=inside;
+  rain.material.opacity=inside?.2:.045;
   if(rain.visible) {
-    const anchor=state.ride>=0?camera.position:controls.target;
+    const anchor=inside?camera.position:controls.target;
     for(let i=0;i<rainSeeds.length;i++) {const s=rainSeeds[i],y=(s[1]-(now*7)%24+24)%24;
       const k=i*6;rainPositions[k]=anchor.x+s[0];rainPositions[k+1]=y;rainPositions[k+2]=anchor.z+s[2];rainPositions[k+3]=anchor.x+s[0]-.045;rainPositions[k+4]=y+.32;rainPositions[k+5]=anchor.z+s[2]+.025;}rainGeo.attributes.position.needsUpdate=true;
   }

@@ -10,7 +10,7 @@ const lights = (() => {
     get calm(){return reduced||setting==='Calm';},
     get intensity(){return level;},
     get amplitude(){return setting==='Full'?1:setting==='Soft'?.5:.2;},
-    get modeFactor(){return state.ride<0?.6:1;},
+    get modeFactor(){return state.ride<0&&!state.explore?.6:1;},
     get cutFactor(){return api.calm?1:setting==='Soft'?.5:.15;},
     get strobes(){return !reduced&&setting==='Full';},
     get colorDuration(){return api.calm?60/140*4:0;},

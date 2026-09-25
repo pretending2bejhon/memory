@@ -41,7 +41,7 @@ def main():
             'streets': [[round(r, 2), w] for r, w in lay['districts']['episodic'].get('streets', [])]}
     blob = json.dumps(data, separators=(',', ':'))
     page = (HERE / 'template.html').read_text(encoding='utf-8').replace('__DATA__', blob)
-    for token, name in [('__CITY_LIFE__', 'city-life.js'), ('__RIDE_CAMERA__', 'ride.js'), ('__CITY_AUDIO__', 'city-audio.js'), ('__BEAT__', 'beat.js'), ('__RAVE_LIGHT__', 'rave-light.js'), ('__CROWD__', 'crowd.js'), ('__SOCIETY__', 'society.js'), ('__ROADS__', 'roads.js')]:
+    for token, name in [('__CITY_LIFE__', 'city-life.js'), ('__RIDE_CAMERA__', 'ride.js'), ('__CITY_AUDIO__', 'city-audio.js'), ('__BEAT__', 'beat.js'), ('__RAVE_LIGHT__', 'rave-light.js'), ('__CROWD__', 'crowd.js'), ('__SOCIETY__', 'society.js'), ('__ROADS__', 'roads.js'), ('__HUD__', 'hud.js'), ('__EXPLORE__', 'explore.js')]:
         page = page.replace(token, (HERE / name).read_text(encoding='utf-8'))
     # Each room is a plain Strudel file, pasteable into strudel.cc and back.
     rooms = {path.stem: path.read_text(encoding='utf-8') for path in sorted((HERE / 'rooms').glob('*.strudel'))}
