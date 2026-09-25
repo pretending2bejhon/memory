@@ -403,7 +403,8 @@ function updatePeople(dt,now){
     }
     let outside=false;const cyw=py+.22;
     for(let k=0;k<24;k+=4)if(viewPlanes[k]*px+viewPlanes[k+1]*cyw+viewPlanes[k+2]*pz+viewPlanes[k+3]<-PERSON_RADIUS){outside=true;break;}
-    if(outside){inViewBefore[i]=0;culled++;continue;}
+    // Aboard people follow a moving deck even when the lake is outside the camera frustum.
+    if(outside&&!p.aboard){inViewBefore[i]=0;culled++;continue;}
     const entering=!inViewBefore[i];inViewBefore[i]=1;
     if(shown[i]&&!entering&&(p.kind===0||!p.follow)&&far>2025&&((i>>6)+frameIndex)%(far>8100?6:3)){lod++;continue;}
     if(p.kind===0){const route=p.path||routes[p.route],offset=p.path?0:Math.min(route.width/2+.04,route.clearance-.12);

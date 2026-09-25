@@ -731,7 +731,7 @@ def verify_boats(engine, lake):
 KICKS = """() => new Promise(resolve => {const v=window.__vc,N=v.nature,k=N.materials.water.uniforms.uKicks.value,hits=[];
   const off=v.beat.on('hit',h=>{if(h.layer==='kick'&&h.gain>0)hits.push(v.beat.diagnostics.lastFrameMs/1000);});
   setTimeout(()=>{off();const rings=Array.from(k).filter(x=>x>0).sort((a,b)=>a-b);
-    resolve({hits:hits.slice(-8),rings,beat:v.beat.beatSeconds,match:rings.length>=6&&rings.every(r=>hits.some(h=>Math.abs(h-r)<1e-6))});},4000);})"""
+    resolve({hits:hits.slice(-8),rings,beat:v.beat.beatSeconds,match:rings.length>=6&&rings.every(r=>hits.some(h=>Math.abs(Math.fround(h)-r)<1e-6))});},4000);})"""
 
 
 def verify_kick_rings(engine):
