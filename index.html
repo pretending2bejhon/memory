@@ -4,14 +4,19 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Vault City</title>
-<meta name="description" content="A living night city shaped by memory, time and connection. Explore twelve districts of a second brain.">
+<meta name="description" content="A living night city shaped by memory, time and connection. Explore twelve districts of a memory system.">
 <link rel="canonical" href="https://jhonalbert.com/memory/">
 <link rel="icon" href="data:,">
 <meta property="og:title" content="Vault City">
-<meta property="og:description" content="A living night city shaped by memory, time and connection. Explore twelve districts of a second brain.">
+<meta property="og:description" content="A living night city shaped by memory, time and connection. Explore twelve districts of a memory system.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://jhonalbert.com/memory/">
-<meta property="og:image" content="og.jpg">
+<meta property="og:image" content="https://jhonalbert.com/memory/og.jpg">
+<meta property="og:image:type" content="image/jpeg">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Vault City">
+<meta name="twitter:description" content="A living night city shaped by memory, time and connection. Explore twelve districts of a memory system.">
+<meta name="twitter:image" content="https://jhonalbert.com/memory/og.jpg">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?f%61mily=Rajdhani:wght@500;600;700&f%61mily=IBM+Plex+Mono:wght@300;400;500&f%61mily=IBM+Plex+Sans:wght@400;500&display=swap">
 </head>
 <body>
@@ -118,6 +123,7 @@
   h1 { font:600 38px/.95 'Rajdhani',var(--sans); text-transform:uppercase; letter-spacing:.1em; }
   .mark p { font:12px/1.6 var(--sans); color:var(--dim); margin:4px 0 0; }
   .mark a { pointer-events:auto; color:var(--dim); font:11px/1.6 var(--sans); text-underline-offset:3px; width:fit-content; }
+  .mark a.cta { color:var(--signal); }
   .mark .city-dot { display:inline-block; width:5px; height:5px; margin-right:8px; background:var(--signal); box-shadow:0 0 10px #6be7e1; }
   .glass { border-radius:4px; box-shadow:0 10px 45px #0004; }
   .bar { bottom:25px; width:min(820px,calc(100% - 40px)); padding:13px 16px; gap:17px; border-top-color:#82baca50; }
@@ -156,7 +162,7 @@
 
 <div id="stage" class="grab"></div>
 
-<header class="mark"><h1>Vault City</h1><span class="eyebrow"><i class="city-dot"></i>Jhon's second brain, rendered as a city</span><a href="https://jhonalbert.com/">Back to Jhon</a><a href="https://github.com/pretending2bejhon/ulpia">The method: Ulpia (MIT)</a><a href="https://github.com/pretending2bejhon/memory">Source (AGPL-3.0), sound by Strudel</a></header>
+<header class="mark"><h1>Vault City</h1><span class="eyebrow"><i class="city-dot"></i>Jhon's memory system, rendered as a city</span><a href="https://jhonalbert.com/">Back to Jhon</a><a class="cta" href="https://cal.com/jhonalbert-alvarez-phuqi8/15min" target="_blank" rel="noopener">Talk to Jhon, 15 min &#8599;</a><a href="https://github.com/pretending2bejhon/ulpia">The method: Ulpia (MIT)</a><a href="https://github.com/pretending2bejhon/memory">Source (AGPL-3.0), sound by Strudel</a></header>
 <div class="city-meta"><strong>After rain · night</strong><br><span id="city-census"></span></div>
 <div class="city-help">Drag to orbit · Scroll to explore<br>R to ride · M for sound · Esc to return</div>
 <div id="loading" role="status"><b>VAULT CITY</b><span>Lighting the streets…</span></div>
